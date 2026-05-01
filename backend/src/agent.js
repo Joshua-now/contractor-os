@@ -1,125 +1,153 @@
-const Anthropic = require('@anthropic-ai/sdk');
-const { pool } = require('./db');
-const { qualifyLead } = require('./skills/leadQualifier');
-const { speedToLead } = require('./skills/speedToLead');
-const { bookAppointment } = require('./skills/appointmentBooker');
-const { followUpEstimate } = require('./skills/estimateFollowUp');
-const { requestReview } = require('./skills/reviewRequestor');
+// agent.js - AI agent loop for Contractor-OS
+// Uses llm.js router — works with OpenRouter OR Anthropic direct
+const { chat, getProvider, getModel } = require('./llm');
+const pool = require('./db');
+const { sendSMS } = require('./skills/speedToLead');
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+/**
+ * Build the system prompt for a contractor's AI assistant
+ */
+function buildSystemPrompt(contractor, memory) {
+  const memoryText = memory.length
+    ? memory.map(m => `- ${m.key}: ${m.value}`).join('\n')
+    : 'No memory stored yet.';
 
-async function getContractorContext(contractorId) {
-  const { rows: memoryRows } = await pool.query(
-    'SELECT key, value, category FROM memory WHERE contractor_id = $1 ORDER BY category',
-    [contractorId]
-  );
-  const { rows: recentConvos } = await pool.query(
-    'SELECT channel, direction, from_number, message, ai_response, created_at FROM conversations WHERE contractor_id = $1 ORDER BY created_at DESC LIMIT 20',
-    [contractorId]
-  );
-  const { rows: [contractor] } = await pool.query(
-    'SELECT * FROM contractors WHERE id = $1',
-    [contractorId]
-  );
-  return { contractor, memory: memoryRows, recentConversations: recentConvos };
+  return `You are an AI assistant for ${contractor.company_name || contractor.name}, an HVAC and roofing contractor.
+
+YOUR PERSONALITY:
+- Professional, friendly, and concise
+- You respond to leads and customers via SMS
+- Keep all messages under 160 characters when possible
+- You qualify leads, book appointments, and follow up on estimates
+
+CONTRACTOR INFO:
+- Company: ${contractor.company_name || contractor.name}
+- Services: ${(contractor.services || ['HVAC', 'Roofing']).join(', ')}
+- Service Area: ${contractor.service_area || 'Local area'}
+- AI Persona: ${contractor.ai_persona || 'professional HVAC/roofing assistant'}
+
+WHAT YOU KNOW (Memory):
+${memoryText}
+
+RULES:
+1. Always be helpful and move leads toward booking
+2. If someone asks for a price, give a range or offer a free estimate
+3. If someone is ready to book, ask for their address and preferred time
+4. Never make promises you can't keep
+5. Keep SMS replies SHORT (under 160 chars)
+6. If you don't know something, say you'll have the contractor follow up`;
 }
 
-async function buildSystemPrompt(contractorId) {
-  const { contractor, memory, recentConversations } = await getContractorContext(contractorId);
-  
-  const memoryStr = memory.map(m => `[${m.category}] ${m.key}: ${m.value}`).join('
-');
-  const convoStr = recentConversations.slice(0, 10).map(c =>
-    `[${c.direction}] ${c.message || ''} -> ${c.ai_response || ''}`
-  ).join('
-');
+/**
+ * Get or create a conversation for a lead
+ */
+async function getOrCreateConversation(contractorId, leadPhone, provider) {
+  let result = await pool.query(
+    `SELECT * FROM conversations WHERE contractor_id = $1 AND lead_phone = $2 AND status = 'open' LIMIT 1`,
+    [contractorId, leadPhone]
+  );
 
-  return `You are an AI assistant for ${contractor.business_name}, a ${contractor.trade_type} contractor.
+  if (result.rows.length) return result.rows[0];
 
-BUSINESS INFO:
-- Trade: ${contractor.trade_type}
-- Service Areas (ZIP codes): ${(contractor.service_zips || []).join(', ')}
-- Working Hours: ${contractor.working_hours?.start} - ${contractor.working_hours?.end}
-
-WHAT YOU KNOW ABOUT THIS BUSINESS:
-${memoryStr || 'No memory stored yet.'}
-
-RECENT CONVERSATIONS:
-${convoStr || 'No recent conversations.'}
-
-YOUR JOB:
-1. Answer inbound calls and texts professionally
-2. Qualify leads by asking about: job type, address, urgency, and budget
-3. Book appointments when the customer is ready
-4. Follow up on unsold estimates
-5. Send review requests after completed jobs
-6. Alert the contractor about important leads
-
-TONE: Professional, friendly, concise. You are representing ${contractor.business_name}.
-Always respond in plain text (no markdown). Keep responses under 160 characters for SMS.
-If you cannot help, offer to have the contractor call them back.`;
+  result = await pool.query(
+    `INSERT INTO conversations (contractor_id, lead_phone, channel, sms_provider, status, created_at, updated_at)
+     VALUES ($1, $2, 'sms', $3, 'open', NOW(), NOW()) RETURNING *`,
+    [contractorId, leadPhone, provider || 'twilio']
+  );
+  return result.rows[0];
 }
 
-async function runAgent({ contractorId, message, channel = 'sms', fromNumber }) {
-  const systemPrompt = await buildSystemPrompt(contractorId);
+/**
+ * Load recent message history for a conversation
+ */
+async function loadHistory(conversationId, limit = 20) {
+  const result = await pool.query(
+    `SELECT role, content FROM messages
+     WHERE conversation_id = $1
+     ORDER BY created_at DESC LIMIT $2`,
+    [conversationId, limit]
+  );
+  return result.rows.reverse();
+}
 
-  // Determine which skill to activate based on message content
-  const lowerMsg = message.toLowerCase();
-  
-  // Call Claude for the response
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 300,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: message }]
-  });
-
-  const aiResponse = response.content[0].text;
-
-  // Save conversation to DB
+/**
+ * Save a message to the conversation
+ */
+async function saveMessage(conversationId, role, content, provider) {
   await pool.query(
-    `INSERT INTO conversations (contractor_id, channel, direction, from_number, message, ai_response)
-     VALUES ($1, $2, 'inbound', $3, $4, $5)`,
-    [contractorId, channel, fromNumber, message, aiResponse]
+    `INSERT INTO messages (conversation_id, role, content, provider, created_at)
+     VALUES ($1, $2, $3, $4, NOW())`,
+    [conversationId, role, content, provider]
   );
+}
 
-  // Check if we should create a lead
-  if (lowerMsg.includes('quote') || lowerMsg.includes('estimate') || lowerMsg.includes('repair') || 
-      lowerMsg.includes('install') || lowerMsg.includes('fix') || lowerMsg.includes('broken')) {
+/**
+ * Load contractor memory
+ */
+async function loadMemory(contractorId) {
+  const result = await pool.query(
+    'SELECT key, value FROM memory WHERE contractor_id = $1 ORDER BY updated_at DESC LIMIT 50',
+    [contractorId]
+  );
+  return result.rows;
+}
+
+/**
+ * Main agent loop — called when a message arrives (SMS, web form, etc.)
+ * @param {object} contractor - Contractor DB row
+ * @param {string} leadPhone - Lead's phone number
+ * @param {string} incomingMessage - The message text from the lead
+ * @param {string} smsProvider - 'twilio' | 'telnyx'
+ */
+async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider = 'twilio') {
+  console.log(`[Agent] ${contractor.company_name} | Lead: ${leadPhone} | Provider: ${smsProvider}`);
+  console.log(`[Agent] LLM: ${getProvider()} / ${getModel()}`);
+
+  try {
+    // 1. Get/create conversation
+    const conversation = await getOrCreateConversation(contractor.id, leadPhone, smsProvider);
+
+    // 2. Save incoming message
+    await saveMessage(conversation.id, 'user', incomingMessage, smsProvider);
+
+    // 3. Load history + memory
+    const history = await loadHistory(conversation.id);
+    const memory = await loadMemory(contractor.id);
+
+    // 4. Build system prompt with contractor context
+    const systemPrompt = buildSystemPrompt(contractor, memory);
+
+    // 5. Call LLM via unified router (OpenRouter or Anthropic)
+    const response = await chat(history, systemPrompt, {
+      maxTokens: 512,
+      temperature: 0.7
+    });
+
+    const replyText = response.content?.trim();
+    if (!replyText) {
+      console.warn('[Agent] Empty response from LLM');
+      return;
+    }
+
+    console.log(`[Agent] Reply (${response.provider}/${response.model}): ${replyText.substring(0, 80)}...`);
+
+    // 6. Save assistant reply
+    await saveMessage(conversation.id, 'assistant', replyText, response.provider);
+
+    // 7. Send SMS back to lead
+    await sendSMS(contractor, leadPhone, replyText);
+
+    // 8. Update conversation timestamp
     await pool.query(
-      `INSERT INTO leads (contractor_id, phone, status, notes) VALUES ($1, $2, 'new', $3)
-       ON CONFLICT DO NOTHING`,
-      [contractorId, fromNumber, message]
+      'UPDATE conversations SET updated_at = NOW() WHERE id = $1',
+      [conversation.id]
     );
-  }
 
-  return aiResponse;
-}
-
-async function runProactiveTask({ contractorId, taskType, data }) {
-  switch (taskType) {
-    case 'morning_briefing': return await generateMorningBriefing(contractorId);
-    case 'estimate_followup': return await followUpEstimate(contractorId, data);
-    case 'review_request': return await requestReview(contractorId, data);
-    default: return null;
+    return { success: true, reply: replyText, provider: response.provider };
+  } catch (err) {
+    console.error('[Agent] Error in agent loop:', err.message);
+    throw err;
   }
 }
 
-async function generateMorningBriefing(contractorId) {
-  const { rows: newLeads } = await pool.query(
-    "SELECT * FROM leads WHERE contractor_id = $1 AND status = 'new' AND created_at > NOW() - INTERVAL '24 hours'",
-    [contractorId]
-  );
-  const { rows: dueTasks } = await pool.query(
-    "SELECT * FROM tasks WHERE contractor_id = $1 AND completed_at IS NULL AND due_at <= NOW() + INTERVAL '24 hours'",
-    [contractorId]
-  );
-
-  return `Good morning! Here's your daily briefing:
-New leads overnight: ${newLeads.length}
-Tasks due today: ${dueTasks.length}
-${newLeads.length > 0 ? 'Top lead: ' + (newLeads[0].name || newLeads[0].phone) : ''}
-Reply LEADS to see all new leads.`;
-}
-
-module.exports = { runAgent, runProactiveTask };
+module.exports = { runAgentLoop, buildSystemPrompt };
