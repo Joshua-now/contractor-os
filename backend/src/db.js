@@ -1,82 +1,122 @@
+// db.js - PostgreSQL connection and schema initialization
 const { Pool } = require('pg');
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-async function setupDatabase() {
+async function initDB() {
   const client = await pool.connect();
   try {
     await client.query(`
       CREATE TABLE IF NOT EXISTS contractors (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        business_name VARCHAR(255) NOT NULL,
-        trade_type VARCHAR(50) NOT NULL CHECK (trade_type IN ('hvac', 'roofing', 'plumbing', 'general')),
-        service_zips TEXT[],
-        working_hours JSONB DEFAULT '{"start":"08:00","end":"18:00","days":["Mon","Tue","Wed","Thu","Fri"]}',
-        phone_number VARCHAR(20),
-        ghl_api_key TEXT,
-        ghl_location_id VARCHAR(255),
-        twilio_phone VARCHAR(20),
-        calendly_url TEXT,
+        name TEXT NOT NULL,
+        company_name TEXT,
+        email TEXT UNIQUE NOT NULL,
+        phone TEXT,
+        -- SMS/Voice provider config
+        twilio_phone TEXT,
+        telnyx_phone TEXT,
+        sms_provider TEXT DEFAULT 'twilio',
+        -- GoHighLevel CRM
+        ghl_contact_id TEXT,
+        ghl_location_id TEXT,
+        -- AI config
+        ai_persona TEXT DEFAULT 'professional HVAC/roofing assistant',
+        service_area TEXT,
+        services TEXT[],
+        -- Subscription
+        plan TEXT DEFAULT 'trial',
+        active BOOLEAN DEFAULT true,
+        onboarded BOOLEAN DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
-      );
+      )
+    `);
 
+    await client.query(`
       CREATE TABLE IF NOT EXISTS conversations (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         contractor_id UUID REFERENCES contractors(id) ON DELETE CASCADE,
-        channel VARCHAR(50) DEFAULT 'sms',
-        direction VARCHAR(10) DEFAULT 'inbound',
-        from_number VARCHAR(20),
-        to_number VARCHAR(20),
-        message TEXT,
-        ai_response TEXT,
-        metadata JSONB DEFAULT '{}',
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
+        lead_phone TEXT NOT NULL,
+        lead_name TEXT,
+        channel TEXT DEFAULT 'sms',
+        sms_provider TEXT DEFAULT 'twilio',
+        status TEXT DEFAULT 'open',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+        content TEXT NOT NULL,
+        provider TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS memory (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         contractor_id UUID REFERENCES contractors(id) ON DELETE CASCADE,
-        key VARCHAR(255) NOT NULL,
+        key TEXT NOT NULL,
         value TEXT NOT NULL,
-        category VARCHAR(100) DEFAULT 'general',
+        category TEXT DEFAULT 'general',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE(contractor_id, key)
-      );
+      )
+    `);
 
+    await client.query(`
       CREATE TABLE IF NOT EXISTS leads (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         contractor_id UUID REFERENCES contractors(id) ON DELETE CASCADE,
-        name VARCHAR(255),
-        phone VARCHAR(20),
-        email VARCHAR(255),
-        address TEXT,
-        job_type VARCHAR(255),
-        urgency VARCHAR(50) DEFAULT 'normal',
-        budget_range VARCHAR(100),
-        status VARCHAR(50) DEFAULT 'new',
-        ghl_contact_id VARCHAR(255),
+        name TEXT,
+        phone TEXT NOT NULL,
+        email TEXT,
+        service_type TEXT,
+        status TEXT DEFAULT 'new',
+        source TEXT DEFAULT 'sms',
+        ghl_contact_id TEXT,
         notes TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
-      );
+      )
+    `);
 
+    await client.query(`
       CREATE TABLE IF NOT EXISTS tasks (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         contractor_id UUID REFERENCES contractors(id) ON DELETE CASCADE,
-        lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
-        type VARCHAR(100) NOT NULL,
-        description TEXT,
-        due_at TIMESTAMPTZ,
-        completed_at TIMESTAMPTZ,
-        metadata JSONB DEFAULT '{}',
+        type TEXT NOT NULL,
+        payload JSONB,
+        status TEXT DEFAULT 'pending',
+        run_at TIMESTAMPTZ,
+        ran_at TIMESTAMPTZ,
+        error TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW()
-      );
+      )
     `);
-    console.log('Database tables ready');
+
+    // Indexes for performance
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_conversations_contractor ON conversations(contractor_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_memory_contractor ON memory(contractor_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_leads_contractor ON leads(contractor_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_tasks_contractor_status ON tasks(contractor_id, status)`);
+
+    console.log('[DB] Schema initialized successfully');
   } finally {
     client.release();
   }
 }
 
-module.exports = { pool, setupDatabase };
+module.exports = pool;
+module.exports.initDB = initDB;
