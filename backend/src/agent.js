@@ -135,7 +135,7 @@ async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider 
     await saveMessage(conversation.id, 'assistant', replyText, response.provider);
 
     // 7. Send SMS back to lead
-    await sendSMS(contractor, leadPhone, replyText);
+        try { await sendSMS(contractor, leadPhone, replyText); } catch (smsErr) { console.error('[Agent] SMS send failed (non-fatal):', smsErr?.message || String(smsErr)); }
 
     // 8. Update conversation timestamp
     await pool.query(
