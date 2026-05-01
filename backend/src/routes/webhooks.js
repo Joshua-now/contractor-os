@@ -101,10 +101,14 @@ router.post('/sms-test', express.json(), async (req, res) => {
                   contractorResult = await db.query('SELECT * FROM contractors LIMIT 1');
           }
 
-      if (!contractorResult.rows.length) {
-              return res.status(404).json({ error: 'No contractor found. Please onboard a contractor first via the frontend.' });
-      }
-
+    if (!contractorResult.rows.length) {
+              console.log('[TEST] No contractor found, creating demo contractor...');
+              const created = await db.query(
+                          'INSERT INTO contractors (name, company_name, email, phone, telnyx_phone, sms_provider, service_area, ai_persona) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (email) DO UPDATE SET name=EXCLUDED.name RETURNING *',
+                          ['Demo Owner', 'Demo HVAC Co.', 'demo@contractoros.test', '+13217324521', '+13217324521', 'telnyx', 'Central Florida', 'professional HVAC assistant']
+                        );
+              contractorResult = { rows: created.rows };
+    }
       const contractor = contractorResult.rows[0];
           console.log(`[TEST] Running agent for contractor: ${contractor.business_name}`);
 
