@@ -1,0 +1,8 @@
+# Railway deployment configuration
+# Connect each service to the corresponding directory
+
+[build]
+builder = "NIXPACKS"
+
+# Backend service - set Root Directory to /backend in Railway
+# Frontend service - set Root Directory to /frontend in Railway
