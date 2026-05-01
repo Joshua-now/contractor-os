@@ -1,70 +1,126 @@
+// routes/webhooks.js - Inbound SMS/Voice webhooks for Twilio AND Telnyx
 const express = require('express');
 const router = express.Router();
-const { runAgent } = require('../agent');
-const { pool } = require('../db');
+const twilio = require('twilio');
+const { parseInboundSMS: parseTelnyxSMS, verifyWebhook: verifyTelnyxWebhook } = require('../telnyx');
+const { runAgentLoop } = require('../agent');
+const pool = require('../db');
 
-// Twilio inbound SMS webhook
-router.post('/sms', async (req, res) => {
-  const { From, To, Body } = req.body;
-
+// ─── TWILIO INBOUND SMS ───────────────────────────────────────────────────────
+router.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res) => {
   try {
-    // Find contractor by their Twilio phone number
-    const { rows } = await pool.query(
-      'SELECT id FROM contractors WHERE twilio_phone = $1 LIMIT 1',
-      [To]
-    );
-
-    if (!rows.length) {
-      console.warn(`No contractor found for phone ${To}`);
-      return res.status(200).send('<Response></Response>');
+    // Verify Twilio signature in production
+    if (process.env.NODE_ENV === 'production') {
+      const authToken = process.env.TWILIO_AUTH_TOKEN;
+      const twilioSignature = req.headers['x-twilio-signature'];
+      const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+      const isValid = twilio.validateRequest(authToken, twilioSignature, url, req.body);
+      if (!isValid) return res.status(403).send('Forbidden');
     }
 
-    const contractorId = rows[0].id;
-    const aiResponse = await runAgent({
-      contractorId,
-      message: Body,
-      channel: 'sms',
-      fromNumber: From
-    });
+    const from = req.body.From;
+    const body = req.body.Body;
+    const contractorPhone = req.body.To;
 
-    // Respond via Twilio TwiML
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Message>${aiResponse}</Message>
-</Response>`;
+    console.log(`[Twilio] Inbound SMS from ${from}: ${body}`);
 
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    // Find contractor by their Twilio number
+    const contractorResult = await pool.query(
+      'SELECT * FROM contractors WHERE twilio_phone = $1 LIMIT 1',
+      [contractorPhone]
+    );
+
+    if (!contractorResult.rows.length) {
+      console.warn('[Twilio] No contractor found for number:', contractorPhone);
+      return res.set('Content-Type', 'text/xml').send('<Response></Response>');
+    }
+
+    const contractor = contractorResult.rows[0];
+    await runAgentLoop(contractor, from, body, 'twilio');
+
+    res.set('Content-Type', 'text/xml').send('<Response></Response>');
   } catch (err) {
-    console.error('SMS webhook error:', err);
-    res.status(500).send('<Response><Message>Sorry, something went wrong. Please call us directly.</Message></Response>');
+    console.error('[Twilio] Webhook error:', err);
+    res.status(500).send('Error');
   }
 });
 
-// Web form lead webhook (from website contact forms)
-router.post('/lead', async (req, res) => {
-  const { contractorId, name, phone, email, jobType, message, source } = req.body;
-
+// ─── TELNYX INBOUND SMS ───────────────────────────────────────────────────────
+router.post('/telnyx/sms', express.json(), async (req, res) => {
   try {
-    if (!contractorId) return res.status(400).json({ error: 'contractorId required' });
-
-    // Create the lead
-    const { rows: [lead] } = await pool.query(
-      `INSERT INTO leads (contractor_id, name, phone, email, job_type, notes, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'new') RETURNING *`,
-      [contractorId, name, phone, email, jobType, message]
-    );
-
-    // Trigger speed-to-lead if phone is available
-    if (phone) {
-      const { speedToLead } = require('../skills/speedToLead');
-      await speedToLead(contractorId, { name, phone, jobType, source });
+    // Verify Telnyx signature
+    if (process.env.NODE_ENV === 'production') {
+      const valid = verifyTelnyxWebhook(req);
+      if (!valid) return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    res.json({ success: true, leadId: lead.id });
+    const parsed = parseTelnyxSMS(req.body);
+    if (!parsed) {
+      return res.status(200).json({ received: true });
+    }
+
+    const { from, to: contractorPhone, body } = parsed;
+    console.log(`[Telnyx] Inbound SMS from ${from}: ${body}`);
+
+    // Find contractor by their Telnyx number
+    const contractorResult = await pool.query(
+      'SELECT * FROM contractors WHERE telnyx_phone = $1 OR twilio_phone = $1 LIMIT 1',
+      [contractorPhone]
+    );
+
+    if (!contractorResult.rows.length) {
+      console.warn('[Telnyx] No contractor found for number:', contractorPhone);
+      return res.status(200).json({ received: true });
+    }
+
+    const contractor = contractorResult.rows[0];
+    await runAgentLoop(contractor, from, body, 'telnyx');
+
+    res.status(200).json({ received: true });
   } catch (err) {
-    console.error('Lead webhook error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('[Telnyx] Webhook error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ─── WEB FORM / LEAD CAPTURE ─────────────────────────────────────────────────
+router.post('/lead', express.json(), async (req, res) => {
+  try {
+    const { contractorId, name, phone, email, service, message } = req.body;
+
+    if (!contractorId || !phone) {
+      return res.status(400).json({ error: 'contractorId and phone are required' });
+    }
+
+    const contractorResult = await pool.query(
+      'SELECT * FROM contractors WHERE id = $1',
+      [contractorId]
+    );
+
+    if (!contractorResult.rows.length) {
+      return res.status(404).json({ error: 'Contractor not found' });
+    }
+
+    const contractor = contractorResult.rows[0];
+
+    // Save lead to DB
+    await pool.query(
+      `INSERT INTO leads (contractor_id, name, phone, email, service_type, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'new', NOW())`,
+      [contractorId, name, phone, email, service]
+    );
+
+    // Kick off speed-to-lead via preferred provider
+    const greeting = message
+      ? `Hi ${name || 'there'}! Got your request about ${service || 'your inquiry'}. ${message.substring(0, 50)}...`
+      : `Hi ${name || 'there'}! We got your request. What can we help you with today?`;
+
+    await runAgentLoop(contractor, phone, greeting, contractor.sms_provider || 'twilio');
+
+    res.json({ success: true, message: 'Lead captured and agent notified' });
+  } catch (err) {
+    console.error('[Lead Webhook] Error:', err);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
