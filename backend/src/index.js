@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { initDB, pool } = require('./db');
+const db = require('./db');
 const agentRoutes = require('./routes/agent');
 const contractorRoutes = require('./routes/contractors');
 const conversationRoutes = require('./routes/conversations');
@@ -29,11 +29,11 @@ app.use('/webhooks', webhookRoutes);
 
 // Start server
 async function start() {
-    await initDB();
-    app.listen(PORT, () => {
-          console.log(`Contractor OS backend running on port ${PORT}`);
-          startHeartbeat();
-    });
+      await db.initDB();
+      app.listen(PORT, () => {
+              console.log(`Contractor OS backend running on port ${PORT}`);
+              startHeartbeat();
+      });
 }
 
 start().catch(console.error);
