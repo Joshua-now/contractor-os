@@ -1,75 +1,70 @@
-const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const { callLLM } = require('../llm');
+const { sendSMS } = require('../telnyx');
 
 const QUALIFICATION_QUESTIONS = [
-  'What type of work do you need done?',
-  'What is the address of the property?',
-  'How urgent is this? (emergency, within a week, flexible)',
-  'Do you have a budget range in mind?'
-];
+    'What type of work do you need done?',
+    'What is the address of the property?',
+    'How urgent is this? (emergency, within a week, flexible)',
+    'Do you have a budget range in mind?'
+  ];
 
 async function qualifyLead(contractorId, leadId, message, conversationHistory = []) {
-  const { rows: [lead] } = await pool.query('SELECT * FROM leads WHERE id = $1', [leadId]);
-  
+    const { rows: [lead] } = await pool.query('SELECT * FROM leads WHERE id = $1', [leadId]);
+
   const missingInfo = [];
-  if (!lead.job_type) missingInfo.push('job_type');
-  if (!lead.address) missingInfo.push('address');
-  if (!lead.urgency || lead.urgency === 'normal') missingInfo.push('urgency');
-  if (!lead.budget_range) missingInfo.push('budget_range');
+    if (!lead.job_type) missingInfo.push('job_type');
+    if (!lead.address) missingInfo.push('address');
+    if (!lead.urgency || lead.urgency === 'normal') missingInfo.push('urgency');
+    if (!lead.budget_range) missingInfo.push('budget_range');
 
   if (missingInfo.length === 0) {
-    await pool.query('UPDATE leads SET status = $1 WHERE id = $2', ['qualified', leadId]);
-    return 'Great! I have all the info I need. I will have our team reach out to schedule your appointment. What time works best for you?';
+        await pool.query('UPDATE leads SET status = $1 WHERE id = $2', ['qualified', leadId]);
+        return 'Great! I have all the info I need. I will have our team reach out to schedule your appointment!';
   }
 
-  const systemPrompt = `You are a lead qualifier for a contractor. Extract information from the customer's message.
-Missing info needed: ${missingInfo.join(', ')}.
-If the customer provided any of this info, acknowledge it and ask for the next missing piece.
-Keep responses under 160 characters. Be friendly and professional.`;
+  const systemPrompt = `You are an AI assistant for an HVAC and roofing contractor. Your job is to qualify leads by gathering missing information.
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 200,
-    system: systemPrompt,
-    messages: [
-      ...conversationHistory,
-      { role: 'user', content: message }
-    ]
-  });
+  Missing info needed: ${missingInfo.join(', ')}
 
-  // Parse and save any extracted info
-  await extractAndSaveleadInfo(leadId, message);
+  Ask ONE question at a time. Be friendly and conversational. Keep responses under 160 characters for SMS.
+  When you get the answer, extract and save it. Do not ask the same question twice.`;
 
-  return response.content[0].text;
-}
+  const messages = [
+        ...conversationHistory.map(h => ({ role: h.role, content: h.content })),
+    { role: 'user', content: message }
+      ];
 
-async function extractAndSaveleadInfo(leadId, message) {
-  const lower = message.toLowerCase();
-  const updates = {};
+  try {
+        const aiResponse = await callLLM(systemPrompt, messages);
 
-  // Simple extraction logic
-  if (lower.includes('ac') || lower.includes('air conditioning') || lower.includes('hvac')) {
-    updates.job_type = 'HVAC - ' + message.substring(0, 100);
-  }
-  if (lower.includes('roof') || lower.includes('shingle') || lower.includes('leak')) {
-    updates.job_type = 'Roofing - ' + message.substring(0, 100);
-  }
-  if (lower.includes('emergency') || lower.includes('urgent') || lower.includes('asap')) {
-    updates.urgency = 'emergency';
-  }
-  if (lower.includes('week') || lower.includes('flexible') || lower.includes('soon')) {
-    updates.urgency = 'within_week';
-  }
+      // Parse response and update lead fields
+      const lower = message.toLowerCase();
+        if (missingInfo.includes('job_type') && lower.match(/hvac|ac|heat|cool|roof|shingle|gutter/)) {
+                const jobType = lower.includes('roof') ? 'roofing' : 'hvac';
+                await pool.query('UPDATE leads SET job_type = $1 WHERE id = $2', [jobType, leadId]);
+        }
+        if (missingInfo.includes('urgency')) {
+                if (lower.includes('emergency') || lower.includes('urgent') || lower.includes('asap')) {
+                          await pool.query('UPDATE leads SET urgency = $1 WHERE id = $2', ['emergency', leadId]);
+                } else if (lower.includes('week') || lower.includes('soon')) {
+                          await pool.query('UPDATE leads SET urgency = $1 WHERE id = $2', ['within_week', leadId]);
+                } else if (lower.includes('flexible') || lower.includes('no rush')) {
+                          await pool.query('UPDATE leads SET urgency = $1 WHERE id = $2', ['flexible', leadId]);
+                }
+        }
 
-  if (Object.keys(updates).length > 0) {
-    const setClauses = Object.keys(updates).map((k, i) => `${k} = $${i + 1}`).join(', ');
-    const values = [...Object.values(updates), leadId];
-    await pool.query(
-      `UPDATE leads SET ${setClauses}, updated_at = NOW() WHERE id = $${values.length}`,
-      values
-    );
+      return aiResponse;
+  } catch (err) {
+        console.error('Lead qualifier error:', err.message);
+        // Fallback to next qualification question
+      const q = QUALIFICATION_QUESTIONS.find(q =>
+              (q.includes('type') && missingInfo.includes('job_type')) ||
+              (q.includes('address') && missingInfo.includes('address')) ||
+              (q.includes('urgent') && missingInfo.includes('urgency')) ||
+              (q.includes('budget') && missingInfo.includes('budget_range'))
+                                                 );
+        return q || 'Thanks! Our team will follow up shortly.';
   }
 }
 
