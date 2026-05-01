@@ -1,133 +1,132 @@
 // routes/webhooks.js - Inbound SMS webhooks for Twilio and Telnyx
 const express = require('express');
 const router = express.Router();
-const twilio = require('twilio');
 const { parseInboundSMS: parseTelnyxSMS, verifyWebhook: verifyTelnyxWebhook } = require('../telnyx');
 const { runAgentLoop } = require('../agent');
 const db = require('../db');
 
-// ── TWILIO INBOUND SMS ────────────────────────────────────────────────────────
+// -- TWILIO INBOUND SMS -------------------------------------------
 router.post('/twilio/sms', express.urlencoded({ extended: false }), async (req, res) => {
-    try {
-          // Verify Twilio signature in production
-      if (process.env.NODE_ENV === 'production') {
-              const authToken = process.env.TWILIO_AUTH_TOKEN;
-              const twilioSignature = req.headers['x-twilio-signature'];
-              const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
-              const isValid = twilio.validateRequest(authToken, twilioSignature, url, req.body);
-              if (!isValid) return res.status(403).send('Forbidden');
-      }
+      try {
+              const from = req.body.From;
+              const body = req.body.Body;
+              const to = req.body.To;
 
-      const from = req.body.From;
-          const body = req.body.Body;
+        console.log(`[Twilio] Inbound SMS from ${from}: ${body}`);
 
-      console.log(`[Twilio] Inbound SMS from ${from}: ${body}`);
-
-      const contractorPhone = req.body.To;
-          const contractorResult = await db.query(
-                  'SELECT * FROM contractors WHERE twilio_phone = $1 LIMIT 1',
-                  [contractorPhone]
+        const { rows } = await db.query(
+                  'SELECT * FROM contractors WHERE twilio_phone = $1 AND active = true LIMIT 1',
+                  [to]
                 );
+              const contractor = rows[0];
+              if (!contractor) {
+                        console.warn('[Twilio] No contractor found for number:', to);
+                        return res.status(200).send('<Response></Response>');
+              }
 
-      if (!contractorResult.rows.length) {
-              console.warn('[Twilio] No contractor found for number:', contractorPhone);
-              return res.set('Content-Type', 'text/xml').send('<Response></Response>');
+        res.status(200).send('<Response></Response>');
+
+        setImmediate(async () => {
+                  try {
+                              await runAgentLoop(contractor, from, body, 'twilio');
+                  } catch (err) {
+                              console.error('[Twilio] Agent error:', err?.message || String(err));
+                  }
+        });
+      } catch (err) {
+              console.error('[Twilio] Webhook error:', err?.message || String(err));
+              res.status(500).send('<Response></Response>');
       }
-
-      const contractor = contractorResult.rows[0];
-          await runAgentLoop(contractor, from, body, 'twilio');
-
-      res.set('Content-Type', 'text/xml').send('<Response></Response>');
-    } catch (err) {
-          console.error('[Twilio] Webhook error:', err);
-          res.status(500).send('Error');
-    }
 });
 
-// ── TELNYX INBOUND SMS ────────────────────────────────────────────────────────
+// -- TELNYX INBOUND SMS ------------------------------------------
 router.post('/telnyx/sms', express.json(), async (req, res) => {
-    try {
-          // Verify Telnyx signature
-      if (process.env.NODE_ENV === 'production') {
-              const valid = verifyTelnyxWebhook(req);
-              if (!valid) return res.status(403).json({ error: 'Invalid signature' });
+      try {
+              if (!verifyTelnyxWebhook(req)) {
+                        return res.status(403).json({ error: 'Invalid signature' });
+              }
+
+        const parsed = parseTelnyxSMS(req.body);
+              if (!parsed) {
+                        return res.status(200).json({ received: true });
+              }
+
+        const { from, to, body } = parsed;
+              console.log(`[Telnyx] Inbound SMS from ${from}: ${body}`);
+
+        const { rows } = await db.query(
+                  'SELECT * FROM contractors WHERE telnyx_phone = $1 AND active = true LIMIT 1',
+                  [to]
+                );
+              const contractor = rows[0];
+              if (!contractor) {
+                        console.warn('[Telnyx] No contractor found for number:', to);
+                        return res.status(200).json({ received: true });
+              }
+
+        res.status(200).json({ received: true });
+
+        setImmediate(async () => {
+                  try {
+                              await runAgentLoop(contractor, from, body, 'telnyx');
+                  } catch (err) {
+                              console.error('[Telnyx] Agent error:', err?.message || String(err));
+                  }
+        });
+      } catch (err) {
+              console.error('[Telnyx] Webhook error:', err?.message || String(err));
+              res.status(500).json({ error: 'Internal server error' });
       }
-
-      const parsed = parseTelnyxSMS(req.body);
-          if (!parsed) {
-                  return res.status(200).json({ received: true });
-          }
-
-      const { from, to: contractorPhone, body } = parsed;
-
-      console.log(`[Telnyx] Inbound SMS from ${from}: ${body}`);
-
-      const contractorResult = await db.query(
-              'SELECT * FROM contractors WHERE telnyx_phone = $1 LIMIT 1',
-              [contractorPhone]
-            );
-
-      if (!contractorResult.rows.length) {
-              console.warn('[Telnyx] No contractor found for number:', contractorPhone);
-              return res.status(200).json({ received: true });
-      }
-
-      const contractor = contractorResult.rows[0];
-          await runAgentLoop(contractor, from, body, 'telnyx');
-
-      res.status(200).json({ received: true });
-    } catch (err) {
-          console.error('[Telnyx] Webhook error:', err);
-          res.status(500).json({ error: 'Internal error' });
-    }
 });
 
-// ── TEST SMS ENDPOINT (no signature required) ─────────────────────────────────
-// Use this to simulate inbound SMS for testing the AI pipeline
+// -- SMS TEST ENDPOINT (dev/testing only) ------------------------
 router.post('/sms-test', express.json(), async (req, res) => {
-    try {
-          const { from = '+14075551234', to, body = 'Hi, I need my AC fixed' } = req.body;
+      const { from, to, body } = req.body;
+      const testFrom = from || '+15555550100';
+      const testTo = to || process.env.TELNYX_PHONE_NUMBER || '+13217324521';
+      const testBody = body || 'Test: My AC unit is not working.';
 
-      console.log(`[TEST] Simulated SMS from ${from}: ${body}`);
+              console.log(`[TEST] Simulated SMS from ${testFrom}: ${testBody}`);
 
-      // Find contractor by telnyx phone, or use the first contractor
-      let contractorResult;
-          if (to) {
-                  contractorResult = await db.query(
-                            'SELECT * FROM contractors WHERE telnyx_phone = $1 OR twilio_phone = $1 LIMIT 1',
-                            [to]
-                          );
-          } else {
-                  contractorResult = await db.query('SELECT * FROM contractors LIMIT 1');
-          }
+              res.status(200).json({
+                      received: true,
+                      message: 'AI agent triggered. Check Railway logs for response.',
+                      from: testFrom,
+                      body: testBody
+              });
 
-    if (!contractorResult.rows.length) {
-              console.log('[TEST] No contractor found, creating demo contractor...');
-              const created = await db.query(
-                          'INSERT INTO contractors (name, company_name, email, phone, telnyx_phone, sms_provider, service_area, ai_persona) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (email) DO UPDATE SET name=EXCLUDED.name RETURNING *',
-                          ['Demo Owner', 'Demo HVAC Co.', 'demo@contractoros.test', '+13217324521', '+13217324521', 'telnyx', 'Central Florida', 'professional HVAC assistant']
-                        );
-              contractorResult = { rows: created.rows };
-    }
-      const contractor = contractorResult.rows[0];
-          console.log(`[TEST] Running agent for contractor: ${contractor.business_name}`);
+              setImmediate(async () => {
+                      try {
+                                let { rows } = await db.query(
+                                            'SELECT * FROM contractors WHERE active = true LIMIT 1'
+                                          );
+                                let contractor = rows[0];
 
-      // Run agent (non-blocking so we can respond immediately)
-      runAgentLoop(contractor, from, body, 'telnyx').catch(err => {
-              console.error('[TEST] Agent error:', err.message);
-      });
+                        if (!contractor) {
+                                    console.log('[TEST] No contractor found, creating demo contractor...');
+                                    const insert = await db.query(
+                                                  `INSERT INTO contractors
+                                                              (name, company_name, email, phone, telnyx_phone, sms_provider,
+                                                                           service_area, services, ai_persona, plan, active)
+                                                                                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
+                                                                                                 RETURNING *`,
+                                                  [
+                                                                  'Demo User', 'Demo HVAC Co.', 'demo@contractoros.test',
+                                                                  testTo, testTo, 'telnyx',
+                                                                  'Central Florida', 'HVAC, AC Repair, Heating',
+                                                                  'Friendly and professional HVAC technician', 'starter'
+                                                                ]
+                                                );
+                                    contractor = insert.rows[0];
+                                    console.log('[TEST] Demo contractor created:', contractor.id);
+                        }
 
-      res.status(200).json({
-              received: true,
-              contractor: contractor.business_name,
-              message: 'AI agent triggered. Check Railway logs for response.',
-              from,
-              body
-      });
-    } catch (err) {
-          console.error('[TEST] SMS test error:', err);
-          res.status(500).json({ error: err.message });
-    }
+                        console.log(`[TEST] Running agent for contractor: ${contractor.id}`);
+                                await runAgentLoop(contractor, testFrom, testBody, 'telnyx');
+                      } catch (err) {
+                                console.error('[TEST] Agent error:', err?.message || String(err));
+                      }
+              });
 });
 
 module.exports = router;
