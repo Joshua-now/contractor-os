@@ -1,4 +1,4 @@
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────// routes/webhooks.js - Inbound SMS/Voice webhooks for Twilio AND Telnyx
+// routes/webhooks.js - Inbound SMS webhooks for Twilio and Telnyx
 const express = require('express');
 const router = express.Router();
 const twilio = require('twilio');
