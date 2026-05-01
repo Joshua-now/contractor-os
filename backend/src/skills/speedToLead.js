@@ -1,42 +1,72 @@
+// skills/speedToLead.js - Sub-60-second first response to new leads
+// Supports Twilio (primary) and Telnyx (alternative provider)
 const twilio = require('twilio');
-const { pool } = require('../db');
+const { sendSMS: telnyxSend } = require('../telnyx');
 
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+// Determine which SMS provider to use
+async function sendSMS(contractor, to, message) {
+  const provider = contractor.sms_provider || 'twilio';
 
-async function speedToLead(contractorId, leadData) {
-  const { rows: [contractor] } = await pool.query(
-    'SELECT * FROM contractors WHERE id = $1', [contractorId]
-  );
-
-  if (!contractor || !contractor.twilio_phone) {
-    console.error('No Twilio phone configured for contractor:', contractorId);
-    return null;
+  if (provider === 'telnyx') {
+    return telnyxSend(to, message);
   }
 
-  const { name, phone, jobType, source } = leadData;
-  
-  const message = `Hi ${name || 'there'}! Thanks for reaching out to ${contractor.business_name}. I saw your ${jobType || 'service'} request. When is a good time to schedule a free estimate? Reply with a time that works for you!`;
+  // Default: Twilio
+  const client = twilio(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  );
+  const result = await client.messages.create({
+    body: message,
+    from: contractor.twilio_phone || process.env.TWILIO_PHONE_NUMBER,
+    to: to
+  });
+  return { success: true, id: result.sid, provider: 'twilio' };
+}
+
+/**
+ * Speed-to-Lead: respond to a new lead in under 60 seconds
+ * @param {object} contractor - Contractor DB row
+ * @param {string} leadPhone - Lead's phone number
+ * @param {string} leadName - Lead's name (if known)
+ * @param {string} service - Service requested (e.g. "AC repair", "new roof")
+ */
+async function speedToLead(contractor, leadPhone, leadName, service) {
+  const firstName = (leadName || '').split(' ')[0] || 'there';
+  const companyName = contractor.company_name || 'our team';
+  const serviceText = service ? ` about your ${service} request` : '';
+
+  // Keep under 160 chars for single SMS
+  const message = `Hi ${firstName}! ${companyName} here${serviceText}. We're on it! Reply to chat or call us now.`.substring(0, 160);
 
   try {
-    const sms = await twilioClient.messages.create({
-      body: message,
-      from: contractor.twilio_phone || process.env.TWILIO_PHONE_NUMBER,
-      to: phone
-    });
-
-    // Log the conversation
-    await pool.query(
-      `INSERT INTO conversations (contractor_id, channel, direction, to_number, message, ai_response)
-       VALUES ($1, 'sms', 'outbound', $2, $3, $4)`,
-      [contractorId, phone, 'Speed-to-lead triggered', message]
-    );
-
-    console.log(`Speed-to-lead SMS sent to ${phone}: ${sms.sid}`);
-    return { success: true, messageSid: sms.sid };
+    const result = await sendSMS(contractor, leadPhone, message);
+    console.log(`[SpeedToLead] Responded to ${leadPhone} via ${result.provider} in < 60s`);
+    return result;
   } catch (err) {
-    console.error('Speed-to-lead SMS failed:', err.message);
-    return { success: false, error: err.message };
+    console.error('[SpeedToLead] SMS failed:', err.message);
+
+    // Fallback: if Telnyx fails, try Twilio and vice versa
+    const fallback = (contractor.sms_provider || 'twilio') === 'telnyx' ? 'twilio' : 'telnyx';
+    console.log(`[SpeedToLead] Attempting fallback via ${fallback}`);
+
+    try {
+      if (fallback === 'twilio') {
+        const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+        const r = await client.messages.create({
+          body: message,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: leadPhone
+        });
+        return { success: true, id: r.sid, provider: 'twilio-fallback' };
+      } else {
+        return await telnyxSend(leadPhone, message);
+      }
+    } catch (fallbackErr) {
+      console.error('[SpeedToLead] Fallback also failed:', fallbackErr.message);
+      throw fallbackErr;
+    }
   }
 }
 
-module.exports = { speedToLead };
+module.exports = { speedToLead, sendSMS };
