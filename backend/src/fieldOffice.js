@@ -64,12 +64,12 @@ async function getGHLOpportunities(ghlContactId) {
 // ─── EXTERNAL API HELPERS ─────────────────────────────────────────────────────
 async function getInstantlyCampaigns() {
   try {
-    const resp = await axios.get('https://api.instantly.ai/api/v1/campaign/list', {
+    const resp = await axios.get('https://api.instantly.ai/api/v2/campaigns', {
       headers: { Authorization: `Bearer ${process.env.INSTANTLY_API_KEY}` },
       params: { limit: 20, skip: 0 },
       timeout: 8000,
     });
-    return { ok: true, campaigns: resp.data || [] };
+    return { ok: true, campaigns: resp.data?.campaigns || resp.data || [] };
   } catch (err) {
     return { ok: false, error: err.message };
   }
