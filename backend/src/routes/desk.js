@@ -1,4 +1,4 @@
-// desk.js — Field Office Desk API
+h// desk.js — Field Office Desk API
 // Powers the office computer UI for Joshua to chat with the AI employee
 //
 // DEFAULT: routes to agent.js — the contractor-OS AI employee (demo mode)
@@ -123,7 +123,7 @@ router.get('/status', async (req, res) => {
                                  }
                                      );
                          const raw = instantly.data;
-                         const campaigns = Array.isArray(raw) ? raw : (raw?.campaigns || raw?.data || []);
+                         const campaigns = Array.isArray(raw) ? raw : (raw?.items || raw?h.items || raw?.campaigns || raw?.data || []);
                          results.instantly = {
                                        ok: true,
                                        total: campaigns.length,
