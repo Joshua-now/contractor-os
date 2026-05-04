@@ -1,264 +1,236 @@
 // voice.js - AI Field Office Voice Route
 // Handles inbound calls from contractors via Telnyx
-// Flow: Contractor calls → AI greets → Records voice memo → Transcribes → Field Office runs → AI reads summary back
+// Flow: Call arrives → AI greets → Record → Transcribe → runConversation → Speak reply → Loop until [END_CALL]
 'use strict';
 
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const pool = require('../db');
-const { runFieldOffice } = require('../fieldOffice');
+const FormData = require('form-data');
+const { runConversation } = require('../fieldOffice');
 
 // In-memory store for active calls (call_control_id → state)
 const activeCalls = new Map();
 
-// ─── HELPERS ────────────────────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 function telnyxAction(callControlId, action, payload = {}) {
-      const token = process.env.TELNYX_API_KEY;
-      return axios.post(
-              `https://api.telnyx.com/v2/calls/${callControlId}/actions/${action}`,
-              payload,
-          { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
-            );
+        const token = process.env.TELNYX_API_KEY;
+        return axios.post(
+                  `https://api.telnyx.com/v2/calls/${callControlId}/actions/${action}`,
+                  payload,
+              { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+                );
 }
 
-async function lookupContractorByPhone(phone) {
-      // Normalize: strip non-digits, keep last 10
-  const normalized = phone.replace(/\D/g, '').slice(-10);
-      const result = await pool.query(
-              `SELECT * FROM contractors WHERE telnyx_phone LIKE $1 AND active = true LIMIT 1`,
-              [`%${normalized}`]
-            );
-      return result.rows[0] || null;
+async function transcribeAudio(recordingUrl) {
+        const token = process.env.TELNYX_API_KEY;
+        // Download the recording
+  const audioResp = await axios.get(recordingUrl, {
+            headers: { Authorization: `Bearer ${token}` },
+            responseType: 'arraybuffer',
+  });
+
+  const formData = new FormData();
+        formData.append('file', Buffer.from(audioResp.data), {
+                  filename: 'recording.mp3',
+                  contentType: 'audio/mpeg',
+        });
+        formData.append('model', 'whisper-1');
+
+  const whisperResp = await axios.post(
+            'https://api.openai.com/v1/audio/transcriptions',
+            formData,
+        {
+                    headers: {
+                                  Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                                  ...formData.getHeaders(),
+                    },
+        }
+          );
+        return whisperResp.data.text || '';
 }
 
-// Convert field office summary to SSML-friendly text
-function toVoiceText(summary) {
-      return summary
-        .replace(/\*\*/g, '')
-        .replace(/\*/g, '')
-        .replace(/#+\s/g, '')
-        .replace(/Done:/g, 'Done.')
-        .trim();
-}
+// ─── WEBHOOK ENTRY POINT ──────────────────────────────────────────────────────
 
-// ─── TELNYX WEBHOOK HANDLER ──────────────────────────────────────────────────
-
-router.post('/telnyx', async (req, res) => {
-      // Acknowledge immediately — Telnyx requires fast response
-              res.sendStatus(200);
+router.post('/webhook', async (req, res) => {
+        res.sendStatus(200); // Acknowledge immediately
 
               const event = req.body?.data;
-      if (!event) return;
+        if (!event) return;
 
               const eventType = event.event_type;
-      const payload = event.payload;
-      const callControlId = payload?.call_control_id;
+        const payload = event.payload || {};
+        const callControlId = payload.call_control_id;
+        const to = payload.to;
+        const from = payload.from;
 
-              console.log(`[Voice] Event: ${eventType} | Call: ${callControlId?.substring(0, 20)}...`);
+              console.log(`[Voice] Event: ${eventType} | callControlId: ${callControlId}`);
 
               try {
-                      switch (eventType) {
+                        switch (eventType) {
 
-                        // ── INBOUND CALL ARRIVES ──
-                          case 'call.initiated': {
-                                      if (payload.direction !== 'incoming') break;
+                          // ── INCOMING CALL ──
+                              case 'call.initiated': {
+                                            // Only handle inbound calls
+                                            if (payload.direction !== 'incoming') break;
 
-                                      const fromNumber = payload.from;
-                                      const toNumber = payload.to;
-
-                                      const contractor = await lookupContractorByPhone(toNumber);
-                                      activeCalls.set(callControlId, {
-                                                    contractorId: contractor?.id || null,
-                                                    contractorName: contractor?.company_name || contractor?.name || 'your company',
-                                                    fromNumber,
-                                                    state: 'ringing',
-                                      });
-
-                                      await telnyxAction(callControlId, 'answer');
-                                      break;
-                          }
-
-                        // ── CALL ANSWERED — PLAY GREETING ──
-                          case 'call.answered': {
-                                      const callState = activeCalls.get(callControlId);
-                                      if (!callState) break;
-
-                                      callState.state = 'greeting';
-                                      const greeting = callState.contractorId
-                                        ? `Hey, ${callState.contractorName} field office here. Go ahead with your report after the beep. I'm recording.`
-                                                    : `AI field office. I couldn't find your account. Please call back from your registered number.`;
-
-                                      await telnyxAction(callControlId, 'speak', {
-                                                    payload: greeting,
-                                                    voice: 'male',
-                                                    language: 'en-US',
-                                                    command_id: 'greeting',
-                                      });
-                                      break;
-                          }
-
-                        // ── SPEAK ENDED — UNIFIED HANDLER (fixes duplicate case bug) ──
-                        // Branches on callState.state to handle all three speak.ended transitions:
-                        //   greeting   → start recording
-                        //   processing → run field office (after "processing" ack speak ends)
-                        //   summary    → hang up (after summary read-back ends)
-                          case 'call.speak.ended': {
-                                      const callState = activeCalls.get(callControlId);
-                                      if (!callState) break;
-
-                                      // ── GREETING DONE → START RECORDING ──
-                                      if (callState.state === 'greeting') {
-                                                    if (!callState.contractorId) {
-                                                                    await telnyxAction(callControlId, 'hangup');
-                                                                    break;
-                                                    }
-                                                    callState.state = 'recording';
-                                                    await telnyxAction(callControlId, 'record_start', {
-                                                                    format: 'mp3',
-                                                                    channels: 'single',
-                                                                    play_beep: true,
-                                                                    timeout_secs: 3,      // Stop after 3s silence
-                                                                    time_limit_secs: 180, // Max 3 minutes
-                                                                    command_id: 'field_report',
-                                                    });
-
-                                      // ── PROCESSING ACK DONE → RUN FIELD OFFICE ──
-                                      } else if (callState.state === 'processing' && callState.transcript) {
-                                                    callState.state = 'running';
-
-                                        let voiceResponse = 'Done. Your report has been processed.';
-                                                    try {
-                                                                    const result = await runFieldOffice(callState.contractorId, callState.transcript);
-                                                                    voiceResponse = toVoiceText(result.voice_response);
-                                                                    console.log(`[Voice] Field office completed: ${result.actions_taken} actions`);
-                                                    } catch (err) {
-                                                                    console.error('[Voice] Field office error:', err.message);
-                                                                    voiceResponse = "I ran into an issue processing your report. It's been logged and we'll follow up.";
-                                                    }
-
-                                        callState.state = 'summary';
-                                                    await telnyxAction(callControlId, 'speak', {
-                                                                    payload: voiceResponse,
-                                                                    voice: 'male',
-                                                                    language: 'en-US',
-                                                                    command_id: 'summary',
-                                                    });
-
-                                      // ── SUMMARY READ → HANG UP ──
-                                      } else if (callState.state === 'summary') {
-                                                    callState.state = 'done';
-                                                    await new Promise(r => setTimeout(r, 1000));
-                                                    await telnyxAction(callControlId, 'hangup');
-                                      }
-
-                                      break;
-                          }
-
-                        // ── RECORDING COMPLETE — TRANSCRIBE + ACK ──
-                          case 'call.recording.saved': {
-                                      const callState = activeCalls.get(callControlId);
-                                      if (!callState) break;
-
-                                      callState.state = 'processing';
-                                      const recordingUrl = payload.recording_urls?.mp3;
-
-                                      if (!recordingUrl) {
-                                                    console.error('[Voice] No recording URL in payload');
-                                                    await telnyxAction(callControlId, 'speak', {
-                                                                    payload: "Sorry, I didn't catch that. Please call back and try again.",
-                                                                    voice: 'male',
-                                                                    language: 'en-US',
-                                                                    command_id: 'error',
-                                                    });
-                                                    break;
-                                      }
-
-                                      console.log(`[Voice] Recording saved: ${recordingUrl}`);
-
-                                      // Transcribe using OpenAI Whisper
-                                      let transcript = '';
-                                      try {
-                                                    const audioResponse = await axios.get(recordingUrl, {
-                                                                    responseType: 'arraybuffer',
-                                                                    headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` },
-                                                    });
-
-                                        const FormData = require('form-data');
-                                                    const form = new FormData();
-                                                    form.append('file', Buffer.from(audioResponse.data), {
-                                                                    filename: 'recording.mp3',
-                                                                    contentType: 'audio/mpeg',
-                                                    });
-                                                    form.append('model', 'whisper-1');
-
-                                        const whisperResponse = await axios.post(
-                                                        'https://api.openai.com/v1/audio/transcriptions',
-                                                        form,
-                                            {
-                                                              headers: {
-                                                                                  ...form.getHeaders(),
-                                                                                  Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-                                                              },
+                                            // Look up contractor by the number they called (telnyx_phone = TO number)
+                                            const result = await pool.query(
+                                                            'SELECT * FROM contractors WHERE telnyx_phone = $1',
+                                                            [to]
+                                                          );
+                                            const contractor = result.rows[0];
+                                            if (!contractor) {
+                                                            console.log(`[Voice] No contractor found for telnyx_phone: ${to}`);
+                                                            break;
                                             }
-                                                      );
 
-                                        transcript = whisperResponse.data?.text || '';
-                                                    console.log(`[Voice] Transcript: "${transcript.substring(0, 200)}"`);
+                                            activeCalls.set(callControlId, {
+                                                            contractorId: contractor.id,
+                                                            contractorName: contractor.name,
+                                                            conversationHistory: [],
+                                                            state: 'ringing',
+                                            });
 
-                                      } catch (transcribeErr) {
-                                                    console.error('[Voice] Transcription failed:', transcribeErr.message);
-                                                    transcript = '';
-                                      }
+                                            await telnyxAction(callControlId, 'answer');
+                                            break;
+                              }
 
-                                      if (!transcript.trim()) {
-                                                    await telnyxAction(callControlId, 'speak', {
-                                                                    payload: "I couldn't understand the recording. Please try again.",
-                                                                    voice: 'male',
-                                                                    language: 'en-US',
-                                                                    command_id: 'transcribe_error',
-                                                    });
-                                                    break;
-                                      }
+                          // ── CALL ANSWERED → PLAY GREETING ──
+                              case 'call.answered': {
+                                            const callState = activeCalls.get(callControlId);
+                                            if (!callState) break;
 
-                                      // Store transcript, then ack while field office runs
-                                      callState.transcript = transcript;
-                                      await telnyxAction(callControlId, 'speak', {
-                                                    payload: 'Got it. Processing your report now.',
-                                                    voice: 'male',
-                                                    language: 'en-US',
-                                                    command_id: 'processing',
-                                      });
-                                      break;
-                          }
+                                            callState.state = 'greeting';
+                                            const greeting = `Hey, Fluid Productions field office. What do you need?`;
 
-                        // ── CALL ENDED — CLEANUP ──
-                          case 'call.hangup': {
-                                      activeCalls.delete(callControlId);
-                                      console.log(`[Voice] Call ended. Active calls: ${activeCalls.size}`);
-                                      break;
-                          }
-                      }
+                                            await telnyxAction(callControlId, 'speak', {
+                                                            payload: greeting,
+                                                            voice: 'female',
+                                                            language: 'en-US',
+                                            });
+                                            break;
+                              }
 
+                          // ── SPEAK FINISHED → START LISTENING ──
+                              case 'call.speak.ended': {
+                                            const callState = activeCalls.get(callControlId);
+                                            if (!callState) break;
+
+                                            if (callState.state === 'greeting' || callState.state === 'listening') {
+                                                            // Start recording — wait for the contractor to speak
+                                              callState.state = 'recording';
+                                                            await telnyxAction(callControlId, 'record_start', {
+                                                                              format: 'mp3',
+                                                                              channels: 'single',
+                                                                              trim_silence: true,
+                                                                              timeout_secs: 5,        // stop recording after 5s of silence
+                                                                              max_length_secs: 120,   // safety cap at 2 minutes
+                                                            });
+                                            } else if (callState.state === 'hanging_up') {
+                                                            // Final goodbye was spoken — now hang up
+                                              await telnyxAction(callControlId, 'hangup');
+                                                            activeCalls.delete(callControlId);
+                                            }
+                                            break;
+                              }
+
+                          // ── RECORDING SAVED → TRANSCRIBE → AI → SPEAK ──
+                              case 'call.recording.saved': {
+                                            const callState = activeCalls.get(callControlId);
+                                            if (!callState) break;
+
+                                            callState.state = 'thinking';
+                                            const recordingUrl = payload.recording_urls?.mp3 || payload.public_recording_urls?.mp3;
+
+                                            if (!recordingUrl) {
+                                                            console.error('[Voice] No recording URL in payload');
+                                                            // Prompt again
+                                              callState.state = 'listening';
+                                                            await telnyxAction(callControlId, 'speak', {
+                                                                              payload: "Sorry, I didn't catch that. Go ahead.",
+                                                                              voice: 'female',
+                                                                              language: 'en-US',
+                                                            });
+                                                            break;
+                                            }
+
+                                            // Transcribe
+                                            let transcript = '';
+                                            try {
+                                                            transcript = await transcribeAudio(recordingUrl);
+                                                            console.log(`[Voice] Transcript: "${transcript}"`);
+                                            } catch (err) {
+                                                            console.error('[Voice] Transcription error:', err.message);
+                                                            callState.state = 'listening';
+                                                            await telnyxAction(callControlId, 'speak', {
+                                                                              payload: "Sorry, I had trouble hearing that. Try again.",
+                                                                              voice: 'female',
+                                                                              language: 'en-US',
+                                                            });
+                                                            break;
+                                            }
+
+                                            if (!transcript.trim()) {
+                                                            // Empty recording — prompt again
+                                              callState.state = 'listening';
+                                                            await telnyxAction(callControlId, 'speak', {
+                                                                              payload: "I didn't hear anything. What do you need?",
+                                                                              voice: 'female',
+                                                                              language: 'en-US',
+                                                            });
+                                                            break;
+                                            }
+
+                                            // Run conversation turn
+                                            let reply, shouldHangUp, updatedHistory;
+                                            try {
+                                                            ({ reply, shouldHangUp, updatedHistory } = await runConversation(
+                                                                              callState.contractorId,
+                                                                              callState.conversationHistory,
+                                                                              transcript
+                                                                            ));
+                                                            callState.conversationHistory = updatedHistory;
+                                            } catch (err) {
+                                                            console.error('[Voice] runConversation error:', err.message);
+                                                            reply = "Something went wrong on my end. Try again.";
+                                                            shouldHangUp = false;
+                                            }
+
+                                            console.log(`[Voice] AI reply: "${reply}" | shouldHangUp: ${shouldHangUp}`);
+
+                                            if (shouldHangUp) {
+                                                            callState.state = 'hanging_up';
+                                            } else {
+                                                            callState.state = 'listening';
+                                            }
+
+                                            await telnyxAction(callControlId, 'speak', {
+                                                            payload: reply,
+                                                            voice: 'female',
+                                                            language: 'en-US',
+                                            });
+                                            break;
+                              }
+
+                          // ── CALL ENDED (remote hangup) ──
+                              case 'call.hangup': {
+                                            if (activeCalls.has(callControlId)) {
+                                                            console.log(`[Voice] Call ended: ${callControlId}`);
+                                                            activeCalls.delete(callControlId);
+                                            }
+                                            break;
+                              }
+
+                              default:
+                                            // Ignore other events
+                            break;
+                        }
               } catch (err) {
-                      console.error(`[Voice] Handler error for ${eventType}:`, err.message);
+                        console.error(`[Voice] Unhandled error for ${eventType}:`, err.message);
               }
-});
-
-// ─── REST ENDPOINT — TEST WITHOUT A REAL CALL ────────────────────────────────
-// POST /api/voice/test { contractorId, transcript }
-router.post('/test', async (req, res) => {
-      const { contractorId, transcript } = req.body;
-      if (!contractorId || !transcript) {
-              return res.status(400).json({ error: 'contractorId and transcript required' });
-      }
-      try {
-              const result = await runFieldOffice(contractorId, transcript);
-              res.json(result);
-      } catch (err) {
-              res.status(500).json({ error: err.message });
-      }
 });
 
 module.exports = router;
