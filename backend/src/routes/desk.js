@@ -1,4 +1,4 @@
-h// desk.js — Field Office Desk API
+// desk.js — Field Office Desk API
 // Powers the office computer UI for Joshua to chat with the AI employee
 //
 // DEFAULT: routes to agent.js — the contractor-OS AI employee (demo mode)
