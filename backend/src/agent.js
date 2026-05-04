@@ -13,7 +13,7 @@ const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunit
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ─── TOOL DEFINITIONS ────────────────────────────────────────────────────────
+// ─── TOOL DEFINITIONS ──────────────────────────────────────────────────────
 const TOOLS = [
     {
             name: 'save_memory',
@@ -151,7 +151,7 @@ const TOOLS = [
     },
     {
             name: 'send_sms',
-            description: 'Send an SMS to the lead. This is your PRIMARY communication tool. ALWAYS call this to reply.',
+            description: 'Send an SMS to the lead (or summarize your response if in desk mode). This is your PRIMARY communication tool. ALWAYS call this to reply.',
             input_schema: {
                       type: 'object',
                       properties: {
@@ -162,16 +162,14 @@ const TOOLS = [
     },
     ];
 
-// ─── MEMORY HELPERS (lead-scoped) ─────────────────────────────────────────────
+// ─── MEMORY HELPERS (lead-scoped) ─────────────────────────────────────────
 async function loadMemory(contractorId, leadPhone = null) {
-      // Load contractor-level memory (no lead_phone) + lead-specific memory
-  const result = await pool.query(
-          `SELECT key, value, category, lead_phone FROM memory
-               WHERE contractor_id = $1
-                      AND (lead_phone IS NULL OR lead_phone = $2)
-                           ORDER BY updated_at DESC LIMIT 60`,
-          [contractorId, leadPhone]
-        );
+      const result = await pool.query(
+              `SELECT key, value, category, lead_phone FROM memory
+                   WHERE contractor_id = $1 AND (lead_phone IS NULL OR lead_phone = $2)
+                        ORDER BY updated_at DESC LIMIT 60`,
+              [contractorId, leadPhone]
+            );
       return result.rows;
 }
 
@@ -186,7 +184,7 @@ async function saveMemory(contractorId, key, value, category = 'general', leadPh
       console.log(`[Memory] ${leadPhone ? `Lead ${leadPhone}` : 'Contractor'}: ${key} = ${value}`);
 }
 
-// ─── CONVERSATION HELPERS ─────────────────────────────────────────────────────
+// ─── CONVERSATION HELPERS ──────────────────────────────────────────────────
 async function getOrCreateConversation(contractorId, leadPhone, provider) {
       let result = await pool.query(
               `SELECT * FROM conversations WHERE contractor_id = $1 AND lead_phone = $2 AND status = 'open' LIMIT 1`,
@@ -239,19 +237,21 @@ async function upsertLead(contractorId, leadPhone, updates) {
       }
 }
 
-// ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
-function buildSystemPrompt(contractor, memory, leadPhone) {
-      // Split memory: lead-specific vs contractor-wide
-  const leadMemory = memory.filter(m => m.lead_phone === leadPhone);
+// ─── SYSTEM PROMPT ──────────────────────────────────────────────────────────
+function buildSystemPrompt(contractor, memory, leadPhone, deskMode = false) {
+      const leadMemory = memory.filter(m => m.lead_phone === leadPhone);
       const contractorMemory = memory.filter(m => !m.lead_phone);
 
   const leadMemoryText = leadMemory.length
-        ? leadMemory.map(m => `  - [${m.category}] ${m.key}: ${m.value}`).join('\n')
-          : '  (no history with this customer yet)';
+        ? leadMemory.map(m => ` - [${m.category}] ${m.key}: ${m.value}`).join('\n')
+          : ' (no history with this customer yet)';
+      const contractorMemoryText = contractorMemory.length
+        ? contractorMemory.map(m => ` - [${m.category}] ${m.key}: ${m.value}`).join('\n')
+              : ' (none)';
 
-  const contractorMemoryText = contractorMemory.length
-        ? contractorMemory.map(m => `  - [${m.category}] ${m.key}: ${m.value}`).join('\n')
-          : '  (none)';
+  const deskNote = deskMode ? `
+
+  DESK MODE: You are being accessed via the office desk UI (not a real SMS). When you call send_sms, your message will be displayed in the chat — NOT sent as a real text. Use this to demo and test the full workflow. Still call all your tools (send_invoice, enroll_maintenance_plan, send_thank_you, update_ghl_contact) and send_sms to show the reply. After executing all requested tasks, call send_sms with a summary of what was done.` : '';
 
   return `You are an AI employee for ${contractor.company_name || contractor.name}, an HVAC and roofing contractor.
 
@@ -263,6 +263,7 @@ function buildSystemPrompt(contractor, memory, leadPhone) {
   - Service Area: ${contractor.service_area || 'Local area'}
   - Persona: ${contractor.ai_persona || 'professional, friendly assistant'}
   ${contractor.review_link ? `- Google Review Link: ${contractor.review_link}` : ''}
+  ${deskNote}
 
   WHAT YOU KNOW ABOUT THIS CUSTOMER (lead-level memory):
   ${leadMemoryText}
@@ -299,9 +300,9 @@ function buildSystemPrompt(contractor, memory, leadPhone) {
   - Free estimate offer when they ask price`;
 }
 
-// ─── TOOL EXECUTOR ────────────────────────────────────────────────────────────
+// ─── TOOL EXECUTOR ──────────────────────────────────────────────────────────
 async function executeTool(toolName, toolInput, context) {
-      const { contractor, leadPhone, conversationId } = context;
+      const { contractor, leadPhone, conversationId, deskMode } = context;
       console.log(`[Tool] ${toolName}:`, JSON.stringify(toolInput).substring(0, 120));
 
   switch (toolName) {
@@ -337,8 +338,7 @@ async function executeTool(toolName, toolInput, context) {
                 await saveMemory(contractor.id, 'appointment_date', `${toolInput.preferred_date} ${toolInput.preferred_time || ''}`.trim(), 'job', leadPhone);
                 if (toolInput.address) await saveMemory(contractor.id, 'address', toolInput.address, 'lead', leadPhone);
                 await pool.query(
-                            `INSERT INTO tasks (contractor_id, type, payload, status, run_at, created_at)
-                                     VALUES ($1, 'appointment_reminder', $2, 'pending', NOW() + INTERVAL '1 hour', NOW())`,
+                            `INSERT INTO tasks (contractor_id, type, payload, status, run_at, created_at) VALUES ($1, 'appointment_reminder', $2, 'pending', NOW() + INTERVAL '1 hour', NOW())`,
                             [contractor.id, JSON.stringify({ leadPhone, ...toolInput })]
                           );
                 return { success: true, status: 'appointment_set', date: toolInput.preferred_date };
@@ -353,7 +353,7 @@ async function executeTool(toolName, toolInput, context) {
                             paymentLink: toolInput.payment_link,
                 });
                 await saveMemory(contractor.id, 'last_invoice', `${toolInput.service_type} $${toolInput.amount}`, 'job', toolInput.customer_phone || leadPhone);
-                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
@@ -365,7 +365,7 @@ async function executeTool(toolName, toolInput, context) {
                             frequency: toolInput.frequency,
                             ghlContactId: toolInput.ghl_contact_id,
                 });
-                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
@@ -377,7 +377,7 @@ async function executeTool(toolName, toolInput, context) {
                             reviewLink: contractor.review_link || null,
                             ghlContactId: toolInput.ghl_contact_id,
                 });
-                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
@@ -413,9 +413,8 @@ async function executeTool(toolName, toolInput, context) {
       case 'get_job_history': {
                 const phone = toolInput.customer_phone || leadPhone;
                 const jobs = await pool.query(
-                            `SELECT service_type, description, amount, status, created_at, completed_at
-                                     FROM jobs WHERE contractor_id = $1 AND customer_phone = $2
-                                              ORDER BY created_at DESC LIMIT $3`,
+                            `SELECT service_type, description, amount, status, created_at, completed_at FROM jobs
+                                     WHERE contractor_id = $1 AND customer_phone = $2 ORDER BY created_at DESC LIMIT $3`,
                             [contractor.id, phone, toolInput.limit || 5]
                           );
                 const leadMem = await loadMemory(contractor.id, phone);
@@ -433,8 +432,11 @@ async function executeTool(toolName, toolInput, context) {
       }
 
       case 'send_sms': {
-                await sendSMS(contractor, leadPhone, toolInput.message);
-                await saveMessage(conversationId, 'assistant', toolInput.message, 'tool');
+                // In desk mode, skip actual SMS send — just return the message for display
+                if (!deskMode) {
+                            await sendSMS(contractor, leadPhone, toolInput.message);
+                            await saveMessage(conversationId, 'assistant', toolInput.message, 'tool');
+                }
                 return { success: true, sent: toolInput.message };
       }
 
@@ -445,23 +447,25 @@ async function executeTool(toolName, toolInput, context) {
 
 // ─── MAIN AGENT LOOP ──────────────────────────────────────────────────────────
 async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider = 'telnyx') {
-      console.log(`[Agent] ${contractor.company_name} | Lead: ${leadPhone}`);
+      const deskMode = smsProvider === 'desk';
+      console.log(`[Agent] ${contractor.company_name} | Lead: ${leadPhone} | Mode: ${deskMode ? 'desk' : 'sms'}`);
 
   const conversation = await getOrCreateConversation(contractor.id, leadPhone, smsProvider);
       await saveMessage(conversation.id, 'user', incomingMessage, smsProvider);
 
   const history = await loadHistory(conversation.id);
-      // Load BOTH contractor-wide and lead-specific memory
-  const memory = await loadMemory(contractor.id, leadPhone);
-      const systemPrompt = buildSystemPrompt(contractor, memory, leadPhone);
+      const memory = await loadMemory(contractor.id, leadPhone);
+      const systemPrompt = buildSystemPrompt(contractor, memory, leadPhone, deskMode);
 
   const messages = history.map(h => ({
           role: h.role === 'assistant' ? 'assistant' : 'user',
           content: h.content,
   }));
 
-  const context = { contractor, leadPhone, conversationId: conversation.id };
-      let smsSent = false;
+  const context = { contractor, leadPhone, conversationId: conversation.id, deskMode };
+
+  let smsSent = false;
+      let lastReply = '';
       let iterations = 0;
       const MAX_ITERATIONS = 8;
 
@@ -484,8 +488,11 @@ async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider 
                   const textBlock = response.content.find(b => b.type === 'text');
                   if (textBlock && !smsSent) {
                               const fallbackReply = textBlock.text.trim().substring(0, 160);
-                              await sendSMS(contractor, leadPhone, fallbackReply);
-                              await saveMessage(conversation.id, 'assistant', fallbackReply, 'anthropic');
+                              lastReply = fallbackReply;
+                              if (!deskMode) {
+                                            await sendSMS(contractor, leadPhone, fallbackReply);
+                                            await saveMessage(conversation.id, 'assistant', fallbackReply, 'anthropic');
+                              }
                               smsSent = true;
                   }
                   break;
@@ -496,9 +503,19 @@ async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider 
                   for (const block of response.content) {
                               if (block.type !== 'tool_use') continue;
                               const result = await executeTool(block.name, block.input, context);
-                              if (block.name === 'send_sms' && result.success) smsSent = true;
-                              if (['send_invoice', 'enroll_maintenance_plan', 'send_thank_you'].includes(block.name) && result.success) smsSent = true;
-                              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
+                              if (block.name === 'send_sms' && result.success) {
+                                            smsSent = true;
+                                            lastReply = result.sent;
+                              }
+                              if (['send_invoice', 'enroll_maintenance_plan', 'send_thank_you'].includes(block.name) && result.success) {
+                                            smsSent = true;
+                                            if (result.smsSent) lastReply = result.smsSent;
+                              }
+                              toolResults.push({
+                                            type: 'tool_result',
+                                            tool_use_id: block.id,
+                                            content: JSON.stringify(result),
+                              });
                   }
                   messages.push({ role: 'user', content: toolResults });
                   continue;
@@ -510,12 +527,15 @@ async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider 
 
   if (!smsSent) {
           const fallback = "Thanks for reaching out! We'll get back to you shortly.";
-          await sendSMS(contractor, leadPhone, fallback);
-          await saveMessage(conversation.id, 'assistant', fallback, 'fallback');
+          lastReply = fallback;
+          if (!deskMode) {
+                    await sendSMS(contractor, leadPhone, fallback);
+                    await saveMessage(conversation.id, 'assistant', fallback, 'fallback');
+          }
   }
 
   await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [conversation.id]);
-      return { success: true, smsSent, iterations };
+      return { success: true, smsSent, iterations, lastReply };
 }
 
 function buildSystemPromptExport(contractor, memory, leadPhone) {
