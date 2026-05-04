@@ -1,25 +1,98 @@
 // fieldOffice.js - The AI Field Office Orchestrator
 // "Run your office from your truck."
-// Supports both batch mode (single-shot voice memo) and conversation mode (interactive back-and-forth)
+// Talks like a real office manager, not a robot.
 'use strict';
 
 const Anthropic = require('@anthropic-ai/sdk');
+const axios = require('axios');
 const pool = require('./db');
 const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunity } = require('./ghl');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ─── GHL LOOKUP HELPERS ───────────────────────────────────────────────────────
+
+function getGHLHeaders() {
+    const token = process.env.GHL_PIT_TOKEN;
+    return {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Version: '2021-07-28',
+    };
+}
+
+async function searchGHLContacts(name) {
+    const locationId = process.env.GHL_LOCATION_ID;
+    try {
+          const resp = await axios.get('https://services.leadconnectorhq.com/contacts/search', {
+                  headers: getGHLHeaders(),
+                  params: { locationId, query: name, limit: 5 },
+          });
+          return resp.data?.contacts || [];
+    } catch (err) {
+          console.error('[GHL] searchGHLContacts error:', err.message);
+          return [];
+    }
+}
+
+async function getGHLContactNotes(ghlContactId) {
+    try {
+          const resp = await axios.get(
+                  `https://services.leadconnectorhq.com/contacts/${ghlContactId}/notes`,
+            { headers: getGHLHeaders() }
+                );
+          return resp.data?.notes || [];
+    } catch (err) {
+          console.error('[GHL] getGHLContactNotes error:', err.message);
+          return [];
+    }
+}
+
+async function getGHLOpportunities(ghlContactId) {
+    const locationId = process.env.GHL_LOCATION_ID;
+    try {
+          const resp = await axios.get('https://services.leadconnectorhq.com/opportunities/search', {
+                  headers: getGHLHeaders(),
+                  params: { location_id: locationId, contact_id: ghlContactId, limit: 5 },
+          });
+          return resp.data?.opportunities || [];
+    } catch (err) {
+          console.error('[GHL] getGHLOpportunities error:', err.message);
+          return [];
+    }
+}
+
 // ─── FIELD OFFICE TOOLS ───────────────────────────────────────────────────────
-// These are the "office actions" the AI can take on behalf of the contractor
 
 const FIELD_OFFICE_TOOLS = [
   {
-        name: 'complete_job',
-        description: 'Mark a job as completed and log what was sold/done.',
+        name: 'look_up_contact',
+        description: 'Look up a contact by name. Returns their pipeline stage, recent notes, open deals — everything we know about them. Use this any time the contractor asks about a customer, project, or account status.',
         input_schema: {
                 type: 'object',
                 properties: {
-                          customer_name: { type: 'string', description: 'Customer full name' },
+                          name: { type: 'string', description: 'Customer or company name to look up' },
+                },
+                required: ['name'],
+        },
+  },
+  {
+        name: 'check_appointments',
+        description: 'Check upcoming appointments. Can filter by customer name or just return the next few on the schedule.',
+        input_schema: {
+                type: 'object',
+                properties: {
+                          customer_name: { type: 'string', description: 'Filter by customer name (optional)' },
+                },
+        },
+  },
+  {
+        name: 'log_job',
+        description: 'Log a completed job — what was done, what was sold, any amount. Creates/updates contact in GHL and adds a note.',
+        input_schema: {
+                type: 'object',
+                properties: {
+                          customer_name: { type: 'string' },
                           job_description: { type: 'string', description: 'What was done or sold' },
                           amount: { type: 'number', description: 'Dollar amount if applicable' },
                 },
@@ -28,7 +101,7 @@ const FIELD_OFFICE_TOOLS = [
   },
   {
         name: 'create_invoice',
-        description: 'Create an invoice for a customer in GHL.',
+        description: 'Create an invoice for a customer.',
         input_schema: {
                 type: 'object',
                 properties: {
@@ -41,12 +114,12 @@ const FIELD_OFFICE_TOOLS = [
   },
   {
         name: 'send_thank_you',
-        description: 'Send a thank-you message to a customer after a job.',
+        description: 'Queue a thank-you message to a customer after a job.',
         input_schema: {
                 type: 'object',
                 properties: {
                           customer_name: { type: 'string' },
-                          job_summary: { type: 'string', description: 'Brief summary of what was done' },
+                          job_summary: { type: 'string' },
                 },
                 required: ['customer_name'],
         },
@@ -64,19 +137,8 @@ const FIELD_OFFICE_TOOLS = [
         },
   },
   {
-        name: 'check_appointment',
-        description: 'Look up appointment details for a customer or date.',
-        input_schema: {
-                type: 'object',
-                properties: {
-                          customer_name: { type: 'string', description: 'Customer name to look up' },
-                          date: { type: 'string', description: 'Date to check, e.g. today, tomorrow, May 5' },
-                },
-        },
-  },
-  {
         name: 'create_contact',
-        description: 'Create a new contact in GHL CRM.',
+        description: 'Add a new contact to the CRM.',
         input_schema: {
                 type: 'object',
                 properties: {
@@ -89,19 +151,8 @@ const FIELD_OFFICE_TOOLS = [
         },
   },
   {
-        name: 'get_job_status',
-        description: 'Get the current status of a job or project for a customer.',
-        input_schema: {
-                type: 'object',
-                properties: {
-                          customer_name: { type: 'string' },
-                },
-                required: ['customer_name'],
-        },
-  },
-  {
         name: 'schedule_followup',
-        description: 'Schedule a follow-up call or visit for a customer.',
+        description: 'Schedule a follow-up call or visit.',
         input_schema: {
                 type: 'object',
                 properties: {
@@ -117,23 +168,105 @@ const FIELD_OFFICE_TOOLS = [
 // ─── TOOL EXECUTOR ────────────────────────────────────────────────────────────
 
 async function executeTool(toolName, toolInput, contractorId) {
-    console.log(`[FieldOffice] Executing tool: ${toolName}`, toolInput);
+    console.log(`[FieldOffice] Tool: ${toolName}`, toolInput);
 
   switch (toolName) {
-    case 'complete_job': {
+
+    case 'look_up_contact': {
+            const { name } = toolInput;
+
+            // Search GHL first (most up-to-date source of truth)
+            const ghlContacts = await searchGHLContacts(name);
+
+            if (ghlContacts.length === 0) {
+                      // Also check local DB
+              const localResult = await pool.query(
+                          `SELECT * FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 3`,
+                          [contractorId, `%${name}%`]
+                        );
+                      if (localResult.rows.length === 0) {
+                                  return { found: false, message: `No contact found for "${name}". Not in GHL or local DB.` };
+                      }
+                      return {
+                                  found: true,
+                                  source: 'local_db',
+                                  contacts: localResult.rows.map(c => ({ name: c.name, phone: c.phone, email: c.email })),
+                                  notes: 'No GHL data available — contact exists locally only.',
+                      };
+            }
+
+            // Get full picture for the top match
+            const contact = ghlContacts[0];
+            const [notes, opportunities] = await Promise.all([
+                      getGHLContactNotes(contact.id),
+                      getGHLOpportunities(contact.id),
+                    ]);
+
+            const recentNotes = notes.slice(0, 3).map(n => ({
+                      body: n.body,
+                      date: n.dateAdded ? new Date(n.dateAdded).toLocaleDateString() : 'unknown',
+            }));
+
+            const openDeals = opportunities.filter(o => o.status !== 'lost' && o.status !== 'won').map(o => ({
+                      name: o.name,
+                      stage: o.pipelineStage?.name || o.status,
+                      value: o.monetaryValue,
+            }));
+
+            return {
+                      found: true,
+                      contact_name: contact.name,
+                      pipeline_stage: contact.opportunityStage || contact.tags?.join(', ') || 'not set',
+                      phone: contact.phone,
+                      email: contact.email,
+                      recent_notes: recentNotes,
+                      open_deals: openDeals,
+                      last_activity: contact.lastActivity || contact.dateUpdated,
+            };
+    }
+
+    case 'check_appointments': {
+            const { customer_name } = toolInput;
+            let query, params;
+            if (customer_name) {
+                      query = `SELECT a.scheduled_at, a.notes, c.name as customer_name
+                                       FROM appointments a JOIN contacts c ON a.contact_id = c.id
+                                                        WHERE a.contractor_id = $1 AND LOWER(c.name) LIKE LOWER($2)
+                                                                         ORDER BY a.scheduled_at ASC LIMIT 5`;
+                      params = [contractorId, `%${customer_name}%`];
+            } else {
+                      query = `SELECT a.scheduled_at, a.notes, c.name as customer_name
+                                       FROM appointments a JOIN contacts c ON a.contact_id = c.id
+                                                        WHERE a.contractor_id = $1 AND a.scheduled_at >= NOW()
+                                                                         ORDER BY a.scheduled_at ASC LIMIT 5`;
+                      params = [contractorId];
+            }
+            const result = await pool.query(query, params);
+            if (result.rows.length === 0) {
+                      return { found: false, message: customer_name ? `Nothing on the books for ${customer_name}.` : 'No upcoming appointments.' };
+            }
+            const appts = result.rows.map(r => {
+                      const d = new Date(r.scheduled_at);
+                      return `${r.customer_name} — ${d.toLocaleDateString()} at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${r.notes ? ` (${r.notes})` : ''}`;
+            });
+            return { found: true, appointments: appts };
+    }
+
+    case 'log_job': {
             const { customer_name, job_description, amount } = toolInput;
-            // Find or create contact in GHL, then add note
             const contacts = await pool.query(
-                      `SELECT id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
+                      `SELECT id, ghl_contact_id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
                       [contractorId, `%${customer_name}%`]
                     );
             let contactId = contacts.rows[0]?.id;
+            let ghlContactId = contacts.rows[0]?.ghl_contact_id;
             if (!contactId) {
                       const ghlContact = await createGHLContact({ name: customer_name }, contractorId);
-                      if (ghlContact?.id) {
+                      ghlContactId = ghlContact?.id;
+                      if (ghlContactId) {
                                   const res = await pool.query(
                                                 `INSERT INTO contacts (contractor_id, name, ghl_contact_id) VALUES ($1, $2, $3) RETURNING id`,
-                                                [contractorId, customer_name, ghlContact.id]
+                                                [contractorId, customer_name, ghlContactId]
                                               );
                                   contactId = res.rows[0].id;
                       }
@@ -141,14 +274,13 @@ async function executeTool(toolName, toolInput, contractorId) {
             if (contactId) {
                       await addGHLNote(contactId, contractorId, `Job completed: ${job_description}${amount ? ` — $${amount}` : ''}`);
             }
-            return { success: true, message: `Job logged for ${customer_name}: ${job_description}` };
+            return { success: true, message: `Logged for ${customer_name}: ${job_description}${amount ? ` ($${amount})` : ''}` };
     }
 
     case 'create_invoice': {
             const { customer_name, amount, description } = toolInput;
-            // Log invoice as a note + opportunity in GHL
             const contacts = await pool.query(
-                      `SELECT id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
+                      `SELECT id, ghl_contact_id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
                       [contractorId, `%${customer_name}%`]
                     );
             let contactId = contacts.rows[0]?.id;
@@ -166,7 +298,7 @@ async function executeTool(toolName, toolInput, contractorId) {
                       await createGHLOpportunity(contactId, contractorId, `Invoice: ${description}`, amount);
                       await addGHLNote(contactId, contractorId, `Invoice created: ${description} — $${amount}`);
             }
-            return { success: true, message: `Invoice queued for ${customer_name}: $${amount} — ${description}` };
+            return { success: true, message: `Invoice queued for ${customer_name}: $${amount}` };
     }
 
     case 'send_thank_you': {
@@ -203,37 +335,7 @@ async function executeTool(toolName, toolInput, contractorId) {
                       await updateGHLContactStage(contactId, contractorId, 'maintenance_plan');
                       await addGHLNote(contactId, contractorId, `Added to maintenance plan${plan_type ? `: ${plan_type}` : ''}`);
             }
-            return { success: true, message: `${customer_name} added to maintenance plan` };
-    }
-
-    case 'check_appointment': {
-            const { customer_name, date } = toolInput;
-            // Query DB for upcoming appointments
-            let query, params;
-            if (customer_name) {
-                      query = `SELECT a.scheduled_at, a.notes, c.name as customer_name 
-                                       FROM appointments a 
-                                                        JOIN contacts c ON a.contact_id = c.id 
-                                                                         WHERE a.contractor_id = $1 AND LOWER(c.name) LIKE LOWER($2)
-                                                                                          ORDER BY a.scheduled_at ASC LIMIT 3`;
-                      params = [contractorId, `%${customer_name}%`];
-            } else {
-                      query = `SELECT a.scheduled_at, a.notes, c.name as customer_name 
-                                       FROM appointments a 
-                                                        JOIN contacts c ON a.contact_id = c.id 
-                                                                         WHERE a.contractor_id = $1 AND a.scheduled_at >= NOW()
-                                                                                          ORDER BY a.scheduled_at ASC LIMIT 5`;
-                      params = [contractorId];
-            }
-            const result = await pool.query(query, params);
-            if (result.rows.length === 0) {
-                      return { found: false, message: `No appointments found${customer_name ? ` for ${customer_name}` : ''}` };
-            }
-            const appts = result.rows.map(r => {
-                      const d = new Date(r.scheduled_at);
-                      return `${r.customer_name} on ${d.toLocaleDateString()} at ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}${r.notes ? ` — ${r.notes}` : ''}`;
-            });
-            return { found: true, appointments: appts };
+            return { success: true, message: `${customer_name} is on the maintenance plan` };
     }
 
     case 'create_contact': {
@@ -245,23 +347,7 @@ async function executeTool(toolName, toolInput, contractorId) {
                                   [contractorId, name, phone || null, email || null, ghlContact.id]
                                 );
             }
-            return { success: true, message: `Contact created: ${name}` };
-    }
-
-    case 'get_job_status': {
-            const { customer_name } = toolInput;
-            const result = await pool.query(
-                      `SELECT j.status, j.description, j.updated_at, c.name
-                               FROM jobs j JOIN contacts c ON j.contact_id = c.id
-                                        WHERE j.contractor_id = $1 AND LOWER(c.name) LIKE LOWER($2)
-                                                 ORDER BY j.updated_at DESC LIMIT 3`,
-                      [contractorId, `%${customer_name}%`]
-                    );
-            if (result.rows.length === 0) {
-                      return { found: false, message: `No jobs found for ${customer_name}` };
-            }
-            const jobs = result.rows.map(r => `${r.name}: ${r.status} — ${r.description}`);
-            return { found: true, jobs };
+            return { success: true, message: `Added ${name} to the CRM` };
     }
 
     case 'schedule_followup': {
@@ -274,7 +360,7 @@ async function executeTool(toolName, toolInput, contractorId) {
             if (contactId) {
                       await addGHLNote(contactId, contractorId, `Follow-up scheduled: ${follow_up_date}${notes ? ` — ${notes}` : ''}`);
             }
-            return { success: true, message: `Follow-up scheduled for ${customer_name} on ${follow_up_date}` };
+            return { success: true, message: `Follow-up set for ${customer_name} on ${follow_up_date}` };
     }
 
     default:
@@ -282,67 +368,61 @@ async function executeTool(toolName, toolInput, contractorId) {
   }
 }
 
-// ─── SYSTEM PROMPT BUILDER ────────────────────────────────────────────────────
+// ─── SYSTEM PROMPT ────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(contractor, mode) {
-    const base = `You are the AI field office assistant for ${contractor.company_name || contractor.name}, a contractor business.
-    Your job is to help the contractor manage their business hands-free while they're on the road.
+    const companyName = contractor.company_name || 'Fluid Productions';
+    const contractorName = contractor.name || 'Joshua';
 
-    You have access to tools to: log completed jobs, create invoices, send thank-you messages, add customers to maintenance plans, check appointments, create contacts, get job status, and schedule follow-ups.
+  const persona = `You are the AI office manager for ${companyName}. Your name is not important — you're just "the office." ${contractorName} calls you from the field and you handle everything back here.
 
-    When the contractor gives you tasks, execute them using the available tools. After executing tools, report back concisely what was done.`;
+  You know this business inside and out. You're sharp, efficient, and talk like a real person — not a customer service bot. Short sentences. Real talk. You don't say "I'll look that up for you!" — you just look it up and tell them what you found.
+
+  When ${contractorName} asks about a customer or project, use the look_up_contact tool to pull their GHL record — notes, pipeline stage, open deals — and give a real answer like "Instantly's still sitting in proposal stage, last note was from Tuesday, no response yet." Not "No data found."
+
+  If something isn't in the system, say so straight: "I don't have anything on that one, you want me to add them?"
+
+  You handle: looking up contacts and project status, logging jobs, creating invoices, queuing thank-yous, maintenance plan signups, checking the schedule, adding contacts, setting follow-ups.`;
 
   if (mode === 'conversation') {
-        return `${base}
+        return `${persona}
 
-        CONVERSATION MODE RULES:
-        - You are in a live phone call. Keep responses SHORT — 1 to 3 sentences max per turn.
-        - After completing a task or answering a question, always end with "Anything else?" to keep the conversation open.
-        - Execute tools silently — just report the result, don't narrate what you're doing.
-        - If the contractor says anything like "that's it", "all done", "nothing else", "bye", "goodbye", "that's all" — say a brief goodbye and append [END_CALL] at the very end of your response.
-        - Never add [END_CALL] unless the contractor explicitly signals they are done.
-        - Be friendly and efficient. You're like a trusted office teammate, not a robot.`;
+        ON THE PHONE RIGHT NOW:
+        - Keep it short. 1-3 sentences max per turn.
+        - After you handle something, just say "anything else?" — don't over-explain.
+        - Do the work silently, just report the result.
+        - If ${contractorName} says he's done — "that's it", "all good", "bye", "nothing else" — give a quick sign-off and put [END_CALL] at the very end. No exceptions, [END_CALL] only goes on when he's wrapping up.`;
   }
 
-  // batch mode
-  return `${base}
+  return `${persona}
 
-  BATCH MODE RULES:
-  - Process all tasks from the transcript in one pass.
-  - Execute every relevant tool you can identify.
-  - After all tools are done, give a brief summary of everything that was completed.
-  - Be comprehensive — don't miss any tasks mentioned.`;
+  You're processing a voice memo. Handle every task mentioned, then give a clean summary of what got done.`;
 }
 
 // ─── SHARED LLM LOOP ──────────────────────────────────────────────────────────
 
 async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 10) {
     let iterations = 0;
+    while (iterations < maxIterations) {
+          iterations++;
+          const response = await anthropic.messages.create({
+                  model: 'claude-opus-4-5',
+                  max_tokens: 1024,
+                  system: systemPrompt,
+                  tools: FIELD_OFFICE_TOOLS,
+                  messages,
+          });
 
-  while (iterations < maxIterations) {
-        iterations++;
-        const response = await anthropic.messages.create({
-                model: 'claude-opus-4-5',
-                max_tokens: 1024,
-                system: systemPrompt,
-                tools: FIELD_OFFICE_TOOLS,
-                messages,
-        });
-
-      console.log(`[FieldOffice] LLM response stop_reason: ${response.stop_reason}`);
-
-      // Add assistant response to message history
-      messages.push({ role: 'assistant', content: response.content });
+      console.log(`[FieldOffice] stop_reason: ${response.stop_reason}`);
+          messages.push({ role: 'assistant', content: response.content });
 
       if (response.stop_reason === 'end_turn') {
-              // Extract final text
-          const textBlock = response.content.find(b => b.type === 'text');
+              const textBlock = response.content.find(b => b.type === 'text');
               return { finalText: textBlock?.text || '', messages };
       }
 
       if (response.stop_reason === 'tool_use') {
-              // Execute all tool calls
-          const toolResults = [];
+              const toolResults = [];
               for (const block of response.content) {
                         if (block.type === 'tool_use') {
                                     const result = await executeTool(block.name, block.input, contractorId);
@@ -356,62 +436,37 @@ async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 
               messages.push({ role: 'user', content: toolResults });
               continue;
       }
-
-      // Unexpected stop reason
-      break;
-  }
-
-  return { finalText: 'I ran into an issue processing that. Please try again.', messages };
+          break;
+    }
+    return { finalText: 'Something went wrong, try again.', messages };
 }
 
-// ─── BATCH MODE (original single-shot) ───────────────────────────────────────
+// ─── BATCH MODE ───────────────────────────────────────────────────────────────
 
 async function runFieldOffice(contractorId, transcript) {
-    console.log(`[FieldOffice] Running batch mode for contractor ${contractorId}`);
-
-  const contractorResult = await pool.query(
-        'SELECT * FROM contractors WHERE id = $1',
-        [contractorId]
-      );
+    console.log(`[FieldOffice] Batch mode for contractor ${contractorId}`);
+    const contractorResult = await pool.query('SELECT * FROM contractors WHERE id = $1', [contractorId]);
     const contractor = contractorResult.rows[0];
     if (!contractor) throw new Error(`Contractor ${contractorId} not found`);
-
-  const systemPrompt = buildSystemPrompt(contractor, 'batch');
+    const systemPrompt = buildSystemPrompt(contractor, 'batch');
     const messages = [{ role: 'user', content: transcript }];
-
-  const { finalText } = await runLLMLoop(contractorId, messages, systemPrompt);
+    const { finalText } = await runLLMLoop(contractorId, messages, systemPrompt);
     return finalText;
 }
 
-// ─── CONVERSATION MODE (interactive back-and-forth) ───────────────────────────
+// ─── CONVERSATION MODE ────────────────────────────────────────────────────────
 
 async function runConversation(contractorId, conversationHistory, userMessage) {
-    console.log(`[FieldOffice] Conversation turn for contractor ${contractorId}: "${userMessage}"`);
-
-  const contractorResult = await pool.query(
-        'SELECT * FROM contractors WHERE id = $1',
-        [contractorId]
-      );
+    console.log(`[FieldOffice] Conversation turn for ${contractorId}: "${userMessage}"`);
+    const contractorResult = await pool.query('SELECT * FROM contractors WHERE id = $1', [contractorId]);
     const contractor = contractorResult.rows[0];
     if (!contractor) throw new Error(`Contractor ${contractorId} not found`);
-
-  const systemPrompt = buildSystemPrompt(contractor, 'conversation');
-
-  // Build messages: history + new user message
-  const messages = [...conversationHistory, { role: 'user', content: userMessage }];
-
-  const { finalText, messages: updatedMessages } = await runLLMLoop(contractorId, messages, systemPrompt);
-
-  // Check if AI wants to end the call
-  const shouldHangUp = finalText.includes('[END_CALL]');
-    // Clean the token from spoken text
-  const reply = finalText.replace('[END_CALL]', '').trim();
-
-  return {
-        reply,
-        shouldHangUp,
-        updatedHistory: updatedMessages,
-  };
+    const systemPrompt = buildSystemPrompt(contractor, 'conversation');
+    const messages = [...conversationHistory, { role: 'user', content: userMessage }];
+    const { finalText, messages: updatedMessages } = await runLLMLoop(contractorId, messages, systemPrompt);
+    const shouldHangUp = finalText.includes('[END_CALL]');
+    const reply = finalText.replace('[END_CALL]', '').trim();
+    return { reply, shouldHangUp, updatedHistory: updatedMessages };
 }
 
 module.exports = { runFieldOffice, runConversation };
