@@ -17,26 +17,26 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const TOOLS = [
     {
             name: 'save_memory',
-            description: 'Save a fact. Use lead_phone to scope it to this specific customer — their name, address, service, preferences. Omit lead_phone for contractor-wide facts. Call this constantly as you learn things.',
+            description: 'Save a fact. Use lead_phone to scope it to this specific customer.',
             input_schema: {
                       type: 'object',
                       properties: {
-                                  key: { type: 'string', description: 'e.g. "lead_name", "service_type", "budget", "address", "preferred_time", "equipment_model"' },
+                                  key: { type: 'string' },
                                   value: { type: 'string' },
                                   category: { type: 'string', enum: ['lead', 'job', 'preference', 'general'] },
-                                  lead_phone: { type: 'string', description: 'Scope this memory to a specific lead. Use their phone number. Leave blank for contractor-wide memory.' },
+                                  lead_phone: { type: 'string' },
                       },
                       required: ['key', 'value'],
             },
     },
     {
             name: 'qualify_lead',
-            description: 'Mark a lead as qualified. Call once you know service type and urgency.',
+            description: 'Mark a lead as qualified.',
             input_schema: {
                       type: 'object',
                       properties: {
                                   lead_name: { type: 'string' },
-                                  service_type: { type: 'string', description: 'e.g. "AC repair", "compressor replacement", "roof inspection"' },
+                                  service_type: { type: 'string' },
                                   urgency: { type: 'string', enum: ['emergency', 'this_week', 'this_month', 'planning'] },
                                   budget_range: { type: 'string' },
                                   notes: { type: 'string' },
@@ -62,31 +62,31 @@ const TOOLS = [
     },
     {
             name: 'send_invoice',
-            description: 'Create an invoice for a completed job and send the amount to the customer via SMS. Call this when Joshua says "invoice them" or "send them a bill".',
+            description: 'Create an invoice for a completed job and send the amount to the customer via SMS.',
             input_schema: {
                       type: 'object',
                       properties: {
                                   customer_name: { type: 'string' },
-                                  customer_phone: { type: 'string', description: 'Customer phone number to send invoice to' },
-                                  service_type: { type: 'string', description: 'What was done, e.g. "Compressor replacement - Trane unit"' },
-                                  amount: { type: 'number', description: 'Invoice amount in dollars' },
+                                  customer_phone: { type: 'string' },
+                                  service_type: { type: 'string' },
+                                  amount: { type: 'number' },
                                   job_description: { type: 'string' },
-                                  payment_link: { type: 'string', description: 'Optional Stripe or payment URL' },
+                                  payment_link: { type: 'string' },
                       },
                       required: ['customer_phone', 'service_type', 'amount'],
             },
     },
     {
             name: 'enroll_maintenance_plan',
-            description: 'Put a customer on a recurring maintenance plan. Call when Joshua says "put them on the maintenance plan".',
+            description: 'Put a customer on a recurring maintenance plan.',
             input_schema: {
                       type: 'object',
                       properties: {
                                   customer_name: { type: 'string' },
                                   customer_phone: { type: 'string' },
-                                  plan_type: { type: 'string', description: 'e.g. "Annual HVAC Maintenance Plan", "Bi-Annual Service Plan"' },
-                                  price: { type: 'number', description: 'Annual plan price' },
-                                  frequency: { type: 'string', enum: ['annual', 'bi-annual', 'monthly'], description: 'How often service occurs' },
+                                  plan_type: { type: 'string' },
+                                  price: { type: 'number' },
+                                  frequency: { type: 'string', enum: ['annual', 'bi-annual', 'monthly'] },
                                   ghl_contact_id: { type: 'string' },
                       },
                       required: ['customer_phone'],
@@ -94,14 +94,14 @@ const TOOLS = [
     },
     {
             name: 'send_thank_you',
-            description: 'Send a post-job thank you message and request a Google review. Call after a job is marked complete.',
+            description: 'Send a post-job thank you message and request a Google review.',
             input_schema: {
                       type: 'object',
                       properties: {
                                   customer_name: { type: 'string' },
                                   customer_phone: { type: 'string' },
                                   service_type: { type: 'string' },
-                                  request_review: { type: 'boolean', description: 'Whether to include a review request (default true)' },
+                                  request_review: { type: 'boolean' },
                                   ghl_contact_id: { type: 'string' },
                       },
                       required: ['customer_phone'],
@@ -139,19 +139,19 @@ const TOOLS = [
     },
     {
             name: 'get_job_history',
-            description: 'Look up past jobs for a customer by phone number. Use this when a returning customer calls — pull their history before responding.',
+            description: 'Look up past jobs for a customer by phone number.',
             input_schema: {
                       type: 'object',
                       properties: {
-                                  customer_phone: { type: 'string', description: 'Customer phone to look up' },
-                                  limit: { type: 'number', description: 'How many past jobs to return (default 5)' },
+                                  customer_phone: { type: 'string' },
+                                  limit: { type: 'number' },
                       },
                       required: ['customer_phone'],
             },
     },
     {
             name: 'send_sms',
-            description: 'Send an SMS to the lead (or summarize your response if in desk mode). This is your PRIMARY communication tool. ALWAYS call this to reply.',
+            description: 'Send an SMS reply to the customer. ALWAYS call this to reply.',
             input_schema: {
                       type: 'object',
                       properties: {
@@ -162,7 +162,7 @@ const TOOLS = [
     },
     ];
 
-// ─── MEMORY HELPERS (lead-scoped) ─────────────────────────────────────────
+// ─── MEMORY HELPERS ────────────────────────────────────────────────────────
 async function loadMemory(contractorId, leadPhone = null) {
       const result = await pool.query(
               `SELECT key, value, category, lead_phone FROM memory
@@ -251,11 +251,15 @@ function buildSystemPrompt(contractor, memory, leadPhone, deskMode = false) {
 
   const deskNote = deskMode ? `
 
-  DESK MODE: You are being accessed via the office desk UI (not a real SMS). When you call send_sms, your message will be displayed in the chat — NOT sent as a real text. Use this to demo and test the full workflow. Still call all your tools (send_invoice, enroll_maintenance_plan, send_thank_you, update_ghl_contact) and send_sms to show the reply. After executing all requested tasks, call send_sms with a summary of what was done.` : '';
+  DESK MODE — DEMO/TESTING: You are being used via the office desk UI. Real SMS will NOT be sent.
+  - Call all your tools normally (send_invoice, enroll_maintenance_plan, send_thank_you, update_ghl_contact)
+  - Call send_sms at the end with a summary of everything that was done
+  - The tools will log the actions but skip actual SMS delivery
+  - Show Joshua exactly what would happen in a real scenario` : '';
 
   return `You are an AI employee for ${contractor.company_name || contractor.name}, an HVAC and roofing contractor.
 
-  YOUR ROLE: You are a smart field office assistant — not a chatbot. You respond to inbound leads via SMS, qualify them, book appointments, invoice completed jobs, enroll customers in maintenance plans, and keep the CRM updated. You run the office from the truck.
+  YOUR ROLE: Smart field office assistant. You handle inbound leads via SMS, qualify them, book appointments, invoice completed jobs, enroll customers in maintenance plans, and keep the CRM updated. You run the office from the truck.
 
   CONTRACTOR:
   - Company: ${contractor.company_name || contractor.name}
@@ -265,39 +269,35 @@ function buildSystemPrompt(contractor, memory, leadPhone, deskMode = false) {
   ${contractor.review_link ? `- Google Review Link: ${contractor.review_link}` : ''}
   ${deskNote}
 
-  WHAT YOU KNOW ABOUT THIS CUSTOMER (lead-level memory):
+  WHAT YOU KNOW ABOUT THIS CUSTOMER:
   ${leadMemoryText}
 
   CONTRACTOR-WIDE MEMORY:
   ${contractorMemoryText}
 
-  YOUR TOOLS — USE THEM AGGRESSIVELY:
-  - save_memory: Save EVERYTHING you learn. Always scope to lead_phone for customer facts.
+  YOUR TOOLS:
+  - save_memory: Save everything you learn, scoped to lead_phone
   - qualify_lead: Mark qualified once you have service + urgency
   - book_appointment: Record confirmed appointments
-  - send_invoice: Create invoice + send payment SMS ("invoice them for $X")
-  - enroll_maintenance_plan: Put customer on recurring plan ("put them on the maintenance plan")
-  - send_thank_you: Post-job thank you + review request ("send them a thank you")
-  - update_ghl_contact: Keep CRM updated after every milestone
-  - get_job_history: Check returning customer's past jobs before responding
-  - send_sms: ALWAYS use this to reply to the customer
+  - send_invoice: Create invoice + SMS ("invoice them for $X")
+  - enroll_maintenance_plan: Put on recurring plan
+  - send_thank_you: Post-job thank you + review request
+  - update_ghl_contact: Keep CRM updated
+  - get_job_history: Check returning customer's history first
+  - send_sms: ALWAYS call this to reply
 
-  WORKFLOW — "RUN YOUR OFFICE FROM YOUR TRUCK":
-  1. If returning customer → get_job_history first
-  2. save_memory for every new fact (name, address, service, equipment, etc.)
-  3. qualify_lead when you have enough info
-  4. book_appointment when they confirm a time
+  WORKFLOW:
+  1. Returning customer? get_job_history first
+  2. save_memory for every new fact
+  3. qualify_lead when you have service + urgency
+  4. book_appointment when they confirm
   5. update_ghl_contact at every milestone
-  6. send_invoice when told to bill them
-  7. enroll_maintenance_plan when told to add them to the plan
+  6. send_invoice when told to bill
+  7. enroll_maintenance_plan when told to add to plan
   8. send_thank_you when job is done
-  9. ALWAYS end by calling send_sms
+  9. ALWAYS end with send_sms
 
-  SMS RULES:
-  - Under 160 characters
-  - Friendly, professional, direct
-  - Move every conversation toward booking
-  - Free estimate offer when they ask price`;
+  SMS: Under 160 chars. Friendly, direct. Push toward booking.`;
 }
 
 // ─── TOOL EXECUTOR ──────────────────────────────────────────────────────────
@@ -309,7 +309,7 @@ async function executeTool(toolName, toolInput, context) {
       case 'save_memory': {
                 const scopedPhone = toolInput.lead_phone || leadPhone;
                 await saveMemory(contractor.id, toolInput.key, toolInput.value, toolInput.category || 'general', scopedPhone);
-                return { success: true, saved: `${toolInput.key} = ${toolInput.value}`, scope: scopedPhone || 'contractor-wide' };
+                return { success: true, saved: `${toolInput.key} = ${toolInput.value}` };
       }
 
       case 'qualify_lead': {
@@ -322,21 +322,17 @@ async function executeTool(toolName, toolInput, context) {
                 await saveMemory(contractor.id, 'lead_status', 'qualified', 'lead', leadPhone);
                 await saveMemory(contractor.id, 'service_type', toolInput.service_type, 'job', leadPhone);
                 if (toolInput.urgency) await saveMemory(contractor.id, 'urgency', toolInput.urgency, 'job', leadPhone);
-                if (toolInput.budget_range) await saveMemory(contractor.id, 'budget_range', toolInput.budget_range, 'job', leadPhone);
                 if (toolInput.lead_name) await saveMemory(contractor.id, 'lead_name', toolInput.lead_name, 'lead', leadPhone);
                 return { success: true, status: 'qualified', service_type: toolInput.service_type };
       }
 
       case 'book_appointment': {
                 await upsertLead(contractor.id, leadPhone, {
-                            name: toolInput.lead_name || null,
                             service_type: toolInput.service_type,
                             status: 'appointment_set',
-                            notes: `Appt: ${toolInput.preferred_date} ${toolInput.preferred_time || ''} | ${toolInput.address || ''} | ${toolInput.notes || ''}`,
+                            notes: `Appt: ${toolInput.preferred_date} ${toolInput.preferred_time || ''} | ${toolInput.address || ''}`,
                 });
-                await saveMemory(contractor.id, 'lead_status', 'appointment_set', 'lead', leadPhone);
                 await saveMemory(contractor.id, 'appointment_date', `${toolInput.preferred_date} ${toolInput.preferred_time || ''}`.trim(), 'job', leadPhone);
-                if (toolInput.address) await saveMemory(contractor.id, 'address', toolInput.address, 'lead', leadPhone);
                 await pool.query(
                             `INSERT INTO tasks (contractor_id, type, payload, status, run_at, created_at) VALUES ($1, 'appointment_reminder', $2, 'pending', NOW() + INTERVAL '1 hour', NOW())`,
                             [contractor.id, JSON.stringify({ leadPhone, ...toolInput })]
@@ -345,39 +341,61 @@ async function executeTool(toolName, toolInput, context) {
       }
 
       case 'send_invoice': {
-                const result = await createInvoice(contractor, toolInput.customer_phone || leadPhone, {
+                const phone = toolInput.customer_phone || leadPhone;
+                if (deskMode) {
+                            // DESK MODE: skip real SMS, log the action
+                  await pool.query(
+                                `INSERT INTO jobs (contractor_id, customer_phone, customer_name, service_type, amount, status, invoice_sent_at, created_at, updated_at)
+                                           VALUES ($1, $2, $3, $4, $5, 'invoiced', NOW(), NOW(), NOW())
+                                                      ON CONFLICT DO NOTHING`,
+                                [contractor.id, phone, toolInput.customer_name || 'Jones', toolInput.service_type, toolInput.amount]
+                              ).catch(() => {});
+                            const invoiceText = `Invoice: ${toolInput.service_type} — $${toolInput.amount}. Pay at: (link would be here)`;
+                            return { success: true, smsSent: invoiceText, deskMode: true, note: 'Invoice logged, SMS skipped in desk mode' };
+                }
+                const result = await createInvoice(contractor, phone, {
                             customerName: toolInput.customer_name,
                             serviceType: toolInput.service_type,
                             amount: toolInput.amount,
                             jobDescription: toolInput.job_description,
                             paymentLink: toolInput.payment_link,
                 });
-                await saveMemory(contractor.id, 'last_invoice', `${toolInput.service_type} $${toolInput.amount}`, 'job', toolInput.customer_phone || leadPhone);
-                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                await saveMemory(contractor.id, 'last_invoice', `${toolInput.service_type} $${toolInput.amount}`, 'job', phone);
+                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
       case 'enroll_maintenance_plan': {
-                const result = await enrollMaintenancePlan(contractor, toolInput.customer_phone || leadPhone, {
+                const phone = toolInput.customer_phone || leadPhone;
+                if (deskMode) {
+                            const planText = `You're enrolled in our ${toolInput.plan_type || 'Annual HVAC Maintenance Plan'}! We'll reach out to schedule your first visit.`;
+                            return { success: true, smsSent: planText, deskMode: true, note: 'Plan logged, SMS skipped in desk mode' };
+                }
+                const result = await enrollMaintenancePlan(contractor, phone, {
                             customerName: toolInput.customer_name,
                             planType: toolInput.plan_type,
                             price: toolInput.price,
                             frequency: toolInput.frequency,
                             ghlContactId: toolInput.ghl_contact_id,
                 });
-                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
       case 'send_thank_you': {
-                const result = await sendThankYou(contractor, toolInput.customer_phone || leadPhone, {
+                const phone = toolInput.customer_phone || leadPhone;
+                if (deskMode) {
+                            const thankText = `Thank you for choosing us, ${toolInput.customer_name || 'Jones family'}! We appreciate your business. ${contractor.review_link ? 'Please leave us a review: ' + contractor.review_link : ''}`;
+                            return { success: true, smsSent: thankText, deskMode: true, note: 'Thank you logged, SMS skipped in desk mode' };
+                }
+                const result = await sendThankYou(contractor, phone, {
                             customerName: toolInput.customer_name,
                             serviceType: toolInput.service_type,
                             requestReview: toolInput.request_review !== false,
                             reviewLink: contractor.review_link || null,
                             ghlContactId: toolInput.ghl_contact_id,
                 });
-                if (!deskMode) await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
+                await saveMessage(conversationId, 'assistant', result.smsSent, 'tool');
                 return result;
       }
 
@@ -413,7 +431,7 @@ async function executeTool(toolName, toolInput, context) {
       case 'get_job_history': {
                 const phone = toolInput.customer_phone || leadPhone;
                 const jobs = await pool.query(
-                            `SELECT service_type, description, amount, status, created_at, completed_at FROM jobs
+                            `SELECT service_type, description, amount, status, created_at FROM jobs
                                      WHERE contractor_id = $1 AND customer_phone = $2 ORDER BY created_at DESC LIMIT $3`,
                             [contractor.id, phone, toolInput.limit || 5]
                           );
@@ -432,7 +450,6 @@ async function executeTool(toolName, toolInput, context) {
       }
 
       case 'send_sms': {
-                // In desk mode, skip actual SMS send — just return the message for display
                 if (!deskMode) {
                             await sendSMS(contractor, leadPhone, toolInput.message);
                             await saveMessage(conversationId, 'assistant', toolInput.message, 'tool');
@@ -448,7 +465,7 @@ async function executeTool(toolName, toolInput, context) {
 // ─── MAIN AGENT LOOP ──────────────────────────────────────────────────────────
 async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider = 'telnyx') {
       const deskMode = smsProvider === 'desk';
-      console.log(`[Agent] ${contractor.company_name} | Lead: ${leadPhone} | Mode: ${deskMode ? 'desk' : 'sms'}`);
+      console.log(`[Agent] ${contractor.company_name} | Lead: ${leadPhone} | Mode: ${deskMode ? 'DESK' : 'SMS'}`);
 
   const conversation = await getOrCreateConversation(contractor.id, leadPhone, smsProvider);
       await saveMessage(conversation.id, 'user', incomingMessage, smsProvider);
@@ -526,7 +543,7 @@ async function runAgentLoop(contractor, leadPhone, incomingMessage, smsProvider 
   }
 
   if (!smsSent) {
-          const fallback = "Thanks for reaching out! We'll get back to you shortly.";
+          const fallback = "Got it! I'll take care of that right away.";
           lastReply = fallback;
           if (!deskMode) {
                     await sendSMS(contractor, leadPhone, fallback);
