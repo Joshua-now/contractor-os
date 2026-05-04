@@ -5,7 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const { runConversation } = require('../fieldOffice');
-const axios = require('axios');
+const axios = require('axios'); const pool = require('../db');
 
 // In-memory session store (per browser session via session token)
 const sessions = new Map();
@@ -22,7 +22,7 @@ router.post('/chat', async (req, res) => {
           const history = sessions.get(sid) || [];
 
           // Joshua's contractor ID is always 1 (the owner account)
-          const contractorId = null; // Will look up by phone in fieldOffice
+          const { rows: [cRow] } = await pool.query("SELECT id FROM contractors WHERE phone = '+13212055991' LIMIT 1"); const contractorId = cRow?.id;
 
           const { reply, shouldHangUp, updatedHistory } = await runConversation(
                   contractorId,
