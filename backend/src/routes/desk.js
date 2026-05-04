@@ -22,7 +22,7 @@ router.post('/chat', async (req, res) => {
           const history = sessions.get(sid) || [];
 
           // Joshua's contractor ID is always 1 (the owner account)
-          const contractorId = 1;
+          const contractorId = null; // Will look up by phone in fieldOffice
 
           const { reply, shouldHangUp, updatedHistory } = await runConversation(
                   contractorId,
