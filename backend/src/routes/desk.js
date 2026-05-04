@@ -123,7 +123,7 @@ router.get('/status', async (req, res) => {
                                  }
                                      );
                          const raw = instantly.data;
-                         const campaigns = Array.isArray(raw) ? raw : (raw?.items || raw?h.items || raw?.campaigns || raw?.data || []);
+                                 const campaigns = Array.isArray(raw) ? raw : (raw?.items || raw?.campaigns || raw?.data || []);
                          results.instantly = {
                                        ok: true,
                                        total: campaigns.length,
