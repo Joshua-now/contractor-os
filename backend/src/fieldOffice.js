@@ -7,6 +7,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
 const pool = require('./db');
 const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunity } = require('./ghl');
+const { makeCall } = require('./telnyx');
+const outboundQueue = require('./outboundQueue');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -142,6 +144,132 @@ async function getSlackMessages(channel) {
     };
   } catch (err) {
     return { ok: false, error: err.message };
+  }
+}
+
+// ─── NEW: INFRASTRUCTURE HELPERS ──────────────────────────────────────────────
+
+// Known Railway service URLs — override via env vars
+const RAILWAY_SERVICES = [
+  { name: 'n8n',           url: () => `${process.env.N8N_BASE_URL || 'https://n8n-production-5955.up.railway.app'}/healthz` },
+  { name: 'Switchboard',   url: () => `${process.env.SWITCHBOARD_URL}/health` },
+  { name: 'Contractor OS', url: () => `${process.env.SELF_URL || 'https://frontend-production-33e9.up.railway.app'}/api/desk/status` },
+  { name: 'Fluid OS',      url: () => process.env.FLUID_OS_URL ? `${process.env.FLUID_OS_URL}/api/health` : null },
+];
+
+async function checkRailwayServices() {
+  const checks = RAILWAY_SERVICES
+    .map(s => ({ name: s.name, url: s.url() }))
+    .filter(s => s.url);
+
+  const results = await Promise.all(checks.map(async ({ name, url }) => {
+    const start = Date.now();
+    try {
+      const resp = await axios.get(url, { timeout: 7000 });
+      return { name, status: 'online', latencyMs: Date.now() - start, httpStatus: resp.status };
+    } catch (err) {
+      const latency = Date.now() - start;
+      if (err.response) {
+        // Got a response but non-2xx — still "up" if it's 401/403 (auth wall)
+        const reachable = [401, 403, 404].includes(err.response.status);
+        return { name, status: reachable ? 'online' : 'degraded', latencyMs: latency, httpStatus: err.response.status };
+      }
+      return { name, status: 'offline', latencyMs: latency, error: err.message };
+    }
+  }));
+  return results;
+}
+
+async function triggerN8nWorkflow(workflowName, action = 'restart') {
+  const headers = { 'X-N8N-API-KEY': process.env.N8N_API_KEY };
+  const base = process.env.N8N_BASE_URL;
+
+  // Find the workflow by name
+  const listResp = await axios.get(`${base}/api/v1/workflows`, {
+    headers,
+    params: { limit: 50 },
+    timeout: 8000,
+  });
+  const workflows = listResp.data?.data || [];
+  const match = workflows.find(w =>
+    w.name.toLowerCase().includes(workflowName.toLowerCase())
+  );
+  if (!match) {
+    return {
+      ok: false,
+      error: `No workflow found matching "${workflowName}"`,
+      available: workflows.map(w => w.name),
+    };
+  }
+
+  if (action === 'activate') {
+    await axios.patch(`${base}/api/v1/workflows/${match.id}`, { active: true }, { headers, timeout: 8000 });
+    return { ok: true, message: `✅ "${match.name}" activated`, workflowId: match.id };
+  }
+
+  if (action === 'deactivate') {
+    await axios.patch(`${base}/api/v1/workflows/${match.id}`, { active: false }, { headers, timeout: 8000 });
+    return { ok: true, message: `⏸ "${match.name}" deactivated`, workflowId: match.id };
+  }
+
+  // Default: restart = deactivate → wait → activate
+  await axios.patch(`${base}/api/v1/workflows/${match.id}`, { active: false }, { headers, timeout: 8000 });
+  await new Promise(r => setTimeout(r, 600));
+  await axios.patch(`${base}/api/v1/workflows/${match.id}`, { active: true }, { headers, timeout: 8000 });
+  return { ok: true, message: `🔄 "${match.name}" restarted (off → on)`, workflowId: match.id };
+}
+
+async function checkGuardianSentinel() {
+  try {
+    const resp = await axios.get(`${process.env.N8N_BASE_URL}/api/v1/executions`, {
+      headers: { 'X-N8N-API-KEY': process.env.N8N_API_KEY },
+      params: { limit: 50 },
+      timeout: 10000,
+    });
+    const all = resp.data?.data || [];
+    const agentRuns = all.filter(e => {
+      const name = (e.workflowData?.name || '').toLowerCase();
+      return name.includes('guardian') || name.includes('sentinel');
+    });
+
+    if (agentRuns.length === 0) {
+      // Also try searching workflows for Guardian/Sentinel to confirm they exist
+      const wfResp = await axios.get(`${process.env.N8N_BASE_URL}/api/v1/workflows`, {
+        headers: { 'X-N8N-API-KEY': process.env.N8N_API_KEY },
+        params: { limit: 50 },
+        timeout: 8000,
+      }).catch(() => ({ data: { data: [] } }));
+      const agents = (wfResp.data?.data || []).filter(w => {
+        const n = w.name.toLowerCase();
+        return n.includes('guardian') || n.includes('sentinel');
+      });
+      return {
+        found: false,
+        agentWorkflows: agents.map(w => ({ name: w.name, active: w.active, id: w.id })),
+        message: agents.length
+          ? `Guardian/Sentinel workflows exist but haven't run recently: ${agents.map(a => a.name).join(', ')}`
+          : 'No Guardian or Sentinel workflows found in n8n',
+      };
+    }
+
+    return {
+      found: true,
+      totalRuns: agentRuns.length,
+      runs: agentRuns.slice(0, 6).map(e => ({
+        agent: e.workflowData?.name || 'Unknown',
+        status: e.status,
+        startedAt: e.startedAt ? new Date(e.startedAt).toLocaleString() : 'N/A',
+        duration: (e.stoppedAt && e.startedAt)
+          ? `${((new Date(e.stoppedAt) - new Date(e.startedAt)) / 1000).toFixed(1)}s`
+          : 'N/A',
+        error: e.status === 'error' ? e.data?.resultData?.error?.message : null,
+      })),
+      lastSuccess: agentRuns.find(e => e.status === 'success')?.startedAt
+        ? new Date(agentRuns.find(e => e.status === 'success').startedAt).toLocaleString()
+        : 'None found',
+    };
+  } catch (err) {
+    return { ok: false, error: `Guardian/Sentinel check failed: ${err.message}` };
   }
 }
 
@@ -287,10 +415,68 @@ const FIELD_OFFICE_TOOLS = [
   },
   {
     name: 'get_system_status',
-    description: 'Get a full health check of all systems at once — Switchboard, n8n, Instantly, Slack. Use when Joshua asks "how is everything running" or "give me a status check".',
+    description: 'Get a full health check of all systems at once — Switchboard, n8n, Instantly, Slack, Railway services. Use when Joshua asks "how is everything running" or "give me a status check".',
     input_schema: {
       type: 'object',
       properties: {},
+    },
+  },
+  // ── NEW TOOLS ──────────────────────────────────────────────────────────────
+  {
+    name: 'check_railway',
+    description: 'Ping every Railway service and report health — n8n, Switchboard, Contractor OS backend, Fluid OS dashboard. Shows which are online, offline, or slow. Use when Joshua asks about infrastructure or server health.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'trigger_n8n_workflow',
+    description: 'Restart, activate, or deactivate a specific n8n workflow by name. Use to fix a stuck automation, restart a failing pipeline like Campaign Launcher or After Hours, or toggle workflows on/off. Always check_n8n first to confirm the workflow name.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        workflow_name: {
+          type: 'string',
+          description: 'Name or partial name of the workflow — e.g. "Campaign Launcher", "After Hours", "Speed to Lead"',
+        },
+        action: {
+          type: 'string',
+          enum: ['restart', 'activate', 'deactivate'],
+          description: 'restart = toggle off then on (default). activate = turn on. deactivate = turn off.',
+        },
+      },
+      required: ['workflow_name'],
+    },
+  },
+  {
+    name: 'check_guardian_sentinel',
+    description: 'Check the last runs of Guardian and Sentinel — the self-healing AI agents that monitor and fix the automation stack. Shows whether they ran, what status they finished with, and any errors they hit.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'make_outbound_call',
+    description: 'Place an outbound phone call to a contact. Bob will speak the message when they answer, then hang up. Use for customer follow-ups, invoice ready notifications, appointment reminders, or check-ins. Bob\'s number is (321) 465-7132.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        phone_number: {
+          type: 'string',
+          description: 'Phone number to call in E.164 format — e.g. +14075551234',
+        },
+        contact_name: {
+          type: 'string',
+          description: 'Name of the person being called (used in the message)',
+        },
+        message: {
+          type: 'string',
+          description: 'Exactly what Bob should say when the call is answered. Keep it under 60 words — natural, friendly, no robocall feel.',
+        },
+      },
+      required: ['phone_number', 'message'],
     },
   },
 ];
@@ -529,11 +715,12 @@ async function executeTool(toolName, toolInput, contractorId) {
     }
 
     case 'get_system_status': {
-      const [sbResult, n8nResult, instantlyResult, slackResult] = await Promise.all([
+      const [sbResult, n8nResult, instantlyResult, slackResult, railwayResult] = await Promise.all([
         getSwitchboardStatus(),
         getN8nWorkflows(),
         getInstantlyCampaigns(),
         getSlackMessages(process.env.SLACK_HAND_RAISES_CHANNEL || 'hand-raises'),
+        checkRailwayServices(),
       ]);
 
       const campaigns = instantlyResult.campaigns || [];
@@ -547,10 +734,67 @@ async function executeTool(toolName, toolInput, contractorId) {
         n8n: n8nResult.ok ? `${n8nActive}/${n8nTotal} workflows active${failures.length ? `, ${failures.length} failures` : ''}` : `DOWN: ${n8nResult.error}`,
         instantly: instantlyResult.ok ? `${activeCampaigns} active campaigns of ${campaigns.length} total` : `DOWN: ${instantlyResult.error}`,
         slack: slackResult.ok ? `Connected, ${slackResult.messages.length} recent hand-raises` : `DOWN: ${slackResult.error}`,
+        railway: railwayResult.map(s => `${s.name}: ${s.status}${s.latencyMs ? ` (${s.latencyMs}ms)` : ''}`),
         backend: 'online',
         n8n_failures: failures,
         recent_hand_raises: slackResult.messages ? slackResult.messages.slice(0, 3) : [],
       };
+    }
+
+    // ── NEW TOOL CASES ─────────────────────────────────────────────────────────
+
+    case 'check_railway': {
+      const results = await checkRailwayServices();
+      const online = results.filter(s => s.status === 'online');
+      const offline = results.filter(s => s.status === 'offline');
+      const degraded = results.filter(s => s.status === 'degraded');
+      return {
+        summary: offline.length === 0 && degraded.length === 0
+          ? `All ${results.length} services online`
+          : `${online.length} online, ${degraded.length} degraded, ${offline.length} offline`,
+        services: results,
+        alerts: [
+          ...offline.map(s => `🔴 ${s.name} is OFFLINE — ${s.error || 'no response'}`),
+          ...degraded.map(s => `🟡 ${s.name} returned HTTP ${s.httpStatus}`),
+        ],
+      };
+    }
+
+    case 'trigger_n8n_workflow': {
+      const { workflow_name, action = 'restart' } = toolInput;
+      try {
+        const result = await triggerN8nWorkflow(workflow_name, action);
+        return result;
+      } catch (err) {
+        return { ok: false, error: `Failed to ${action} workflow: ${err.message}` };
+      }
+    }
+
+    case 'check_guardian_sentinel': {
+      return await checkGuardianSentinel();
+    }
+
+    case 'make_outbound_call': {
+      const { phone_number, contact_name, message } = toolInput;
+      const selfUrl = process.env.SELF_URL || 'https://frontend-production-33e9.up.railway.app';
+      const webhookUrl = `${selfUrl}/api/voice/webhook`;
+
+      try {
+        const callResult = await makeCall(phone_number, webhookUrl);
+        // Store the message so voice.js webhook can retrieve it when the call is answered
+        outboundQueue.set(callResult.callControlId, {
+          message,
+          contactName: contact_name || phone_number,
+          initiatedAt: new Date().toISOString(),
+        });
+        return {
+          success: true,
+          message: `📞 Calling ${contact_name || phone_number} now. Bob will say: "${message}"`,
+          callControlId: callResult.callControlId,
+        };
+      } catch (err) {
+        return { success: false, error: `Call failed: ${err.message}` };
+      }
     }
 
     default:
@@ -586,15 +830,27 @@ Contractors — HVAC, plumbing, roofing, electrical, pest control. Best prospect
 PIPELINE STAGES (in order):
 New Lead → Demo Scheduled → Proposal Sent → Trial Started → Closed Won → Closed Lost
 
-YOUR SYSTEMS:
+YOUR SYSTEMS (you can monitor AND control all of these):
 - Switchboard: AI call platform (Anna = Speed to Lead bot, Maya = After Hours bot)
-- n8n: Automation workflows (Reply Handler, Pipeline Watchdog, Campaign Launcher, Lead Machine)
+- n8n: Automation workflows — you can restart any of them if they break
 - Instantly: Cold email outreach campaigns
 - Slack: #hand-raises channel for hot leads, #alerts for system issues
 - GHL (GoHighLevel): CRM and pipeline
+- Railway: Infrastructure hosting — you can ping each service to check health
+- Guardian & Sentinel: Self-healing AI agents that monitor and auto-fix the automation stack
+
+YOUR CAPABILITIES:
+- Look up any contact or prospect in GHL
+- Log calls, meetings, and activities
+- Move deals through the pipeline
+- Schedule follow-ups
+- Check all system health (Railway, n8n, Switchboard, Instantly, Slack)
+- Restart broken n8n workflows
+- Check whether Guardian/Sentinel ran and what they fixed
+- Make outbound calls to customers (Bob's number: (321) 465-7132)
 
 YOUR JOB:
-You know every prospect, every deal, every follow-up. When Joshua asks about someone, pull their record and give him a real answer — what stage they're in, what the last note says, which tier they're interested in, whether they've gone cold. When he tells you something happened, log it. When he needs something done, do it. When he asks about system status, CHECK the actual systems — don't guess or say "I don't have that data."
+You know every prospect, every deal, every follow-up. When Joshua asks about someone, pull their record and give him a real answer — what stage they're in, what the last note says, which tier they're interested in, whether they've gone cold. When he tells you something happened, log it. When he needs something done, do it. When he asks about system status, CHECK the actual systems — don't guess or say "I don't have that data." If a workflow is broken, restart it. If Guardian/Sentinel missed something, handle it yourself.
 
 Talk like a real person. Short. Direct. No corporate speak. You've worked for Joshua for years and know how he operates.`;
 
