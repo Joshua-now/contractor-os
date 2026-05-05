@@ -3,22 +3,30 @@
 // Joshua's personal office manager — knows Fluid Productions inside and out.
 'use strict';
 
-const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
 const pool = require('./db');
 const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunity } = require('./ghl');
 const { makeCall } = require('./telnyx');
 const outboundQueue = require('./outboundQueue');
 
-// Route through OpenRouter so Bob runs on the same budget as everything else
-const anthropic = new Anthropic({
-  apiKey: process.env.OPENROUTER_API_KEY,
-  baseURL: 'https://openrouter.ai/api/v1',
-  defaultHeaders: {
-    'HTTP-Referer': 'https://fluid-os.aiteammate.io',
-    'X-Title': 'Fluid Productions Bob',
-  },
-});
+// Raw OpenRouter fetch — bypasses Anthropic SDK response mangling
+async function openRouterMessages(params) {
+  const res = await fetch('https://openrouter.ai/api/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://fluid-os.aiteammate.io',
+      'X-Title': 'Fluid Productions Bob',
+    },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`OpenRouter error ${res.status}: ${err}`);
+  }
+  return res.json();
+}
 
 // ─── GHL LOOKUP HELPERS ───────────────────────────────────────────────────────
 function getGHLHeaders() {
@@ -882,7 +890,7 @@ async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 
   let iterations = 0;
   while (iterations < maxIterations) {
     iterations++;
-    const response = await anthropic.messages.create({
+    const response = await openRouterMessages({
       model: 'anthropic/claude-opus-4-5',
       max_tokens: 1024,
       system: systemPrompt,
