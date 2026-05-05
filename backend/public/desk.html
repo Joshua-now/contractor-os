@@ -467,7 +467,7 @@
       const res = await fetch(API + '/api/desk/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, sessionId }),
+        body: JSON.stringify({ message: text, sessionId, mode: 'sales' }),
       });
       const data = await res.json();
       removeTyping(typingId);
