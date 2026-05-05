@@ -130,7 +130,7 @@ async function chat(messages, systemPrompt, options = {}) {
   } catch (err) {
     console.error(`[LLM] ${provider} failed: ${err.message}`);
 
-    // Auto-fallback: if OpenRouter fails, try Anthropic direct (if key exists)
+    throw err;
     if (provider === 'openrouter' && process.env.ANTHROPIC_API_KEY) {
       console.log('[LLM] Falling back to Anthropic direct...');
       const fallbackOptions = { ...options, model: 'claude-sonnet-4-5' };
