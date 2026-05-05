@@ -27,7 +27,7 @@ const DESK_TEST_PHONE = '+10000000001';
 // Body: { message: string, sessionId: string, mode: 'contractor' | 'sales' }
 router.post('/chat', async (req, res) => {
           try {
-                      const { message, sessionId, mode } = req.body;
+                      const { message, sessionId, mode, docContext } = req.body;
                       if (!message) return res.status(400).json({ error: 'message required' });
 
             const sid = sessionId || 'default';
@@ -55,7 +55,7 @@ router.post('/chat', async (req, res) => {
 
             // CONTRACTOR DEMO MODE (default): AI employee demo
             // smsProvider = 'desk' triggers deskMode in agent.js (no real SMS sent)
-            const result = await runAgentLoop(cRow, DESK_TEST_PHONE, message, 'desk');
+            const result = await runAgentLoop(cRow, DESK_TEST_PHONE, message, 'desk', docContext || '');
                       const reply = result.lastReply || 'Done.';
 
             res.json({ reply, shouldHangUp: false, sessionId: sid });
