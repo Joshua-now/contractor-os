@@ -10,7 +10,15 @@ const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunit
 const { makeCall } = require('./telnyx');
 const outboundQueue = require('./outboundQueue');
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Route through OpenRouter so Bob runs on the same budget as everything else
+const anthropic = new Anthropic({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  baseURL: 'https://openrouter.ai/api/v1',
+  defaultHeaders: {
+    'HTTP-Referer': 'https://fluid-os.aiteammate.io',
+    'X-Title': 'Fluid Productions Bob',
+  },
+});
 
 // ─── GHL LOOKUP HELPERS ───────────────────────────────────────────────────────
 function getGHLHeaders() {
@@ -875,7 +883,7 @@ async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 
   while (iterations < maxIterations) {
     iterations++;
     const response = await anthropic.messages.create({
-      model: 'claude-opus-4-5',
+      model: 'anthropic/claude-opus-4-5',
       max_tokens: 1024,
       system: systemPrompt,
       tools: FIELD_OFFICE_TOOLS,
