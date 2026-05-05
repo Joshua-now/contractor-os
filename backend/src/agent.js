@@ -26,10 +26,7 @@ async function openRouterCreate(params) {
                                                         const err = await res.text();
                                                             throw new Error(`OpenRouter error ${res.status}: ${err}`);
                                                               }
-                                                                return res.json();
-                                                                }
-}
-
+                                                                return res.json();}
 // ─── FLUID PRODUCTIONS OFFICE MANAGER PROMPT ─────────────────────────────
 // This is Bob's core identity — used when smsProvider === 'desk' and contractor is Joshua
 const FLUID_PRODUCTIONS_PROMPT = `You are the AI Office Manager for Fluid Productions — your name is Bob.
