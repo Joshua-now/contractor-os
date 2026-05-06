@@ -6,8 +6,9 @@
 const axios = require('axios');
 const pool = require('./db');
 const { createGHLContact, updateGHLContactStage, addGHLNote, createGHLOpportunity } = require('./ghl');
-const { makeCall } = require('./telnyx');
+const { makeCall, sendSMS } = require('./telnyx');
 const outboundQueue = require('./outboundQueue');
+const { createInvoice } = require('./skills/invoicer');
 
 // Raw OpenRouter fetch — bypasses Anthropic SDK response mangling
 // Includes 30s timeout + one retry on 429/5xx
@@ -492,6 +493,46 @@ const FIELD_OFFICE_TOOLS = [
     },
   },
   {
+    name: 'send_invoice',
+    description: 'Send an invoice via SMS to a customer. Looks up their phone from GHL, creates an invoice record, and texts them the amount with an optional payment link. Use when Joshua says "send Mike an invoice for $X", "invoice the Johnson job", or "bill them for the repair".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contact_name: { type: 'string', description: 'Customer name to look up in GHL' },
+        service_type: { type: 'string', description: 'What the job was — AC repair, roof replacement, tune-up, etc.' },
+        amount: { type: 'number', description: 'Dollar amount for the invoice' },
+        job_description: { type: 'string', description: 'Brief description of work done (optional)' },
+        payment_link: { type: 'string', description: 'Stripe or other payment link URL (optional)' },
+      },
+      required: ['contact_name', 'amount'],
+    },
+  },
+  {
+    name: 'send_text',
+    description: 'Send an actual SMS text message to a customer. Looks up their number from GHL by name. Use when Joshua says "text Mike and tell him...", "shoot the Johnson job a message", or "let them know...".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contact_name: { type: 'string', description: 'Customer name to look up for their phone number' },
+        message: { type: 'string', description: 'The text message to send. Keep under 160 characters, natural tone.' },
+        phone_number: { type: 'string', description: 'Direct phone in E.164 format — use instead of contact_name if you already have it' },
+      },
+      required: ['message'],
+    },
+  },
+  {
+    name: 'request_review',
+    description: 'Send a Google review request via SMS to a customer after a completed job. Use when Joshua says "ask Mike for a review", "send a review request", or "get a Google review from the Johnson job".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        contact_name: { type: 'string', description: 'Customer name to send the review request to' },
+        job_type: { type: 'string', description: 'Type of job completed — used to personalize the message (e.g. roof replacement, AC tune-up)' },
+      },
+      required: ['contact_name'],
+    },
+  },
+  {
     name: 'make_outbound_call',
     description: 'Place an outbound phone call to a contact. Bob will speak the message when they answer, then hang up. Use for customer follow-ups, invoice ready notifications, appointment reminders, or check-ins. Bob\'s number is (321) 465-7132.',
     input_schema: {
@@ -679,15 +720,33 @@ async function executeTool(toolName, toolInput, contractorId) {
 
     case 'send_follow_up_message': {
       const { contact_name, message_type, context } = toolInput;
-      const contacts = await pool.query(
+      // Look up phone from GHL so we can actually send the message
+      const ghlContacts = await searchGHLContacts(contact_name);
+      const contact = ghlContacts[0];
+      if (contact?.phone && message_type !== 'email') {
+        const msg = context
+          ? `Hi ${contact.name?.split(' ')[0] || 'there'}, just following up — ${context}`
+          : `Hi ${contact.name?.split(' ')[0] || 'there'}, just checking in. Let us know if you have any questions!`;
+        await sendSMS(contact.phone, msg.substring(0, 160));
+        // Also log the note in GHL
+        const localContact = await pool.query(
+          `SELECT id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
+          [contractorId, `%${contact_name}%`]
+        );
+        if (localContact.rows[0]?.id) {
+          await addGHLNote(localContact.rows[0].id, contractorId, `Follow-up text sent: ${msg}`);
+        }
+        return { success: true, message: `Follow-up text sent to ${contact.name} at ${contact.phone}` };
+      }
+      // Fallback: log the note if no phone found
+      const localContact = await pool.query(
         `SELECT id FROM contacts WHERE contractor_id = $1 AND LOWER(name) LIKE LOWER($2) LIMIT 1`,
         [contractorId, `%${contact_name}%`]
       );
-      const contactId = contacts.rows[0]?.id;
-      if (contactId) {
-        await addGHLNote(contactId, contractorId, `Follow-up ${message_type || 'message'} queued${context ? `: ${context}` : ''}`);
+      if (localContact.rows[0]?.id) {
+        await addGHLNote(localContact.rows[0].id, contractorId, `Follow-up ${message_type || 'message'} needed${context ? `: ${context}` : ''}`);
       }
-      return { success: true, message: `Follow-up ${message_type || 'message'} queued for ${contact_name}` };
+      return { success: false, message: `No phone found for ${contact_name} — logged a note in GHL instead` };
     }
 
     case 'check_instantly': {
@@ -829,6 +888,71 @@ async function executeTool(toolName, toolInput, contractorId) {
       } catch (err) {
         return { success: false, error: `Call failed: ${err.message}` };
       }
+    }
+
+    case 'send_invoice': {
+      const { contact_name, service_type, amount, job_description, payment_link } = toolInput;
+      const ghlContacts = await searchGHLContacts(contact_name);
+      const contact = ghlContacts[0];
+      if (!contact || !contact.phone) {
+        return { success: false, error: `No phone number found for ${contact_name} in GHL. Make sure they're in the system.` };
+      }
+      const contractorRow = await pool.query('SELECT * FROM contractors WHERE id = $1', [contractorId]);
+      const contractor = contractorRow.rows[0];
+      const result = await createInvoice(contractor, contact.phone, {
+        customerName: contact.name,
+        serviceType: service_type || 'Service',
+        amount,
+        jobDescription: job_description,
+        paymentLink: payment_link,
+      });
+      return {
+        success: result.success,
+        message: `Invoice sent to ${contact.name} at ${contact.phone} for $${amount}${service_type ? ` (${service_type})` : ''}`,
+        smsSent: result.smsSent,
+      };
+    }
+
+    case 'send_text': {
+      const { contact_name, message, phone_number } = toolInput;
+      let toPhone = phone_number;
+      let toName = contact_name;
+      if (!toPhone && contact_name) {
+        const ghlContacts = await searchGHLContacts(contact_name);
+        const contact = ghlContacts[0];
+        if (!contact || !contact.phone) {
+          return { success: false, error: `No phone number found for ${contact_name} in GHL.` };
+        }
+        toPhone = contact.phone;
+        toName = contact.name;
+      }
+      if (!toPhone) {
+        return { success: false, error: 'Need a contact name or phone number to send a text.' };
+      }
+      await sendSMS(toPhone, message);
+      return { success: true, message: `Text sent to ${toName || toPhone}: "${message}"` };
+    }
+
+    case 'request_review': {
+      const { contact_name, job_type } = toolInput;
+      const ghlContacts = await searchGHLContacts(contact_name);
+      const contact = ghlContacts[0];
+      if (!contact || !contact.phone) {
+        return { success: false, error: `No phone number found for ${contact_name} in GHL.` };
+      }
+      const contractorRow = await pool.query('SELECT * FROM contractors WHERE id = $1', [contractorId]);
+      const contractor = contractorRow.rows[0];
+      const memResult = await pool.query(
+        "SELECT value FROM memory WHERE contractor_id = $1 AND key = 'google_review_link'",
+        [contractorId]
+      ).catch(() => ({ rows: [] }));
+      const reviewLink = memResult.rows[0]?.value || 'https://g.page/r/review';
+      const companyName = contractor.company_name || contractor.name;
+      const firstName = contact.name?.split(' ')[0] || 'there';
+      const jobText = job_type || 'recent project';
+      const smsBody = `Hi ${firstName}! Hope your ${jobText} is going great. We'd love a quick review: ${reviewLink} — ${companyName}`;
+      await sendSMS(contact.phone, smsBody);
+      return { success: true, message: `Review request sent to ${contact.name} at ${contact.phone}` };
     }
 
     default:
