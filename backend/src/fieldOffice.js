@@ -10,22 +10,38 @@ const { makeCall } = require('./telnyx');
 const outboundQueue = require('./outboundQueue');
 
 // Raw OpenRouter fetch — bypasses Anthropic SDK response mangling
-async function openRouterMessages(params) {
-  const res = await fetch('https://openrouter.ai/api/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://fluid-os.aiteammate.io',
-      'X-Title': 'Fluid Productions Bob',
-    },
-    body: JSON.stringify(params),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenRouter error ${res.status}: ${err}`);
+// Includes 30s timeout + one retry on 429/5xx
+async function openRouterMessages(params, attempt = 1) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://fluid-os.aiteammate.io',
+        'X-Title': 'Fluid Productions Bob',
+      },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      // Retry once on rate-limit or server error
+      if (attempt === 1 && (res.status === 429 || res.status >= 500)) {
+        await new Promise(r => setTimeout(r, 2000));
+        return openRouterMessages(params, 2);
+      }
+      throw new Error(`OpenRouter error ${res.status}: ${err}`);
+    }
+    return res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('OpenRouter request timed out after 30s');
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 // ─── GHL LOOKUP HELPERS ───────────────────────────────────────────────────────
@@ -171,7 +187,7 @@ async function getSlackMessages(channel) {
 const RAILWAY_SERVICES = [
   { name: 'n8n',           url: () => `${process.env.N8N_BASE_URL || 'https://n8n-production-5955.up.railway.app'}/healthz` },
   { name: 'Switchboard',   url: () => `${process.env.SWITCHBOARD_URL}/health` },
-  { name: 'Contractor OS', url: () => `${process.env.SELF_URL || 'https://frontend-production-33e9.up.railway.app'}/api/desk/status` },
+  { name: 'Contractor OS', url: () => `${process.env.SELF_URL || 'https://backend-production-b9fc.up.railway.app'}/health` },
   { name: 'Fluid OS',      url: () => process.env.FLUID_OS_URL ? `${process.env.FLUID_OS_URL}/api/health` : null },
 ];
 

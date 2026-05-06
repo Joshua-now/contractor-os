@@ -33,28 +33,52 @@ async function sendHeartbeatSMS(to, from, body) {
 function startHeartbeat() {
           console.log('Heartbeat service started');
 
-  // Morning briefing - every day at 7am
-  cron.schedule('0 7 * * *', async () => {
-              console.log('Running morning briefing...');
-              try {
-                            const { rows: contractors } = await db.query(
-                                            'SELECT * FROM contractors WHERE active = true AND phone IS NOT NULL'
-                                          );
-                            for (const contractor of contractors) {
-                                            try {
-                                                              const fromNumber = contractor.telnyx_phone || contractor.twilio_phone || null;
-                                                              if (fromNumber && contractor.phone) {
-                                                                                  await sendHeartbeatSMS(contractor.phone, fromNumber, 
-                                                                                                                       `Good morning! Your AI assistant is ready to handle leads today.`
-                                                                                                                     );
-                                                              }
-                                            } catch (err) {
-                                                              console.error('Morning briefing SMS error for contractor', contractor.id, ':', err?.message || String(err));
-                                            }
-                            }
-              } catch (err) {
-                            console.error('Morning briefing error:', err?.message || String(err));
-              }
+  // Morning briefing - 10:00 UTC = 6:00 AM EDT
+  cron.schedule('0 10 * * *', async () => {
+    console.log('[Heartbeat] Running morning briefing (6 AM Eastern)...');
+    try {
+      const { rows: contractors } = await db.query(
+        'SELECT * FROM contractors WHERE active = true AND phone IS NOT NULL'
+      );
+      for (const contractor of contractors) {
+        try {
+          const fromNumber = contractor.telnyx_phone || contractor.twilio_phone || null;
+          if (fromNumber && contractor.phone) {
+            await sendHeartbeatSMS(contractor.phone, fromNumber,
+              `Good morning! Your AI assistant is online. Switchboard, GHL, and Instantly are being checked now.`
+            );
+          }
+        } catch (err) {
+          console.error('[Heartbeat] Morning briefing SMS error for contractor', contractor.id, ':', err?.message || String(err));
+        }
+      }
+    } catch (err) {
+      console.error('[Heartbeat] Morning briefing error:', err?.message || String(err));
+    }
+  });
+
+  // Evening briefing - 22:00 UTC = 6:00 PM EDT
+  cron.schedule('0 22 * * *', async () => {
+    console.log('[Heartbeat] Running evening briefing (6 PM Eastern)...');
+    try {
+      const { rows: contractors } = await db.query(
+        'SELECT * FROM contractors WHERE active = true AND phone IS NOT NULL'
+      );
+      for (const contractor of contractors) {
+        try {
+          const fromNumber = contractor.telnyx_phone || contractor.twilio_phone || null;
+          if (fromNumber && contractor.phone) {
+            await sendHeartbeatSMS(contractor.phone, fromNumber,
+              `Evening check-in: reviewing your Instantly campaigns and n8n workflow status now.`
+            );
+          }
+        } catch (err) {
+          console.error('[Heartbeat] Evening briefing SMS error for contractor', contractor.id, ':', err?.message || String(err));
+        }
+      }
+    } catch (err) {
+      console.error('[Heartbeat] Evening briefing error:', err?.message || String(err));
+    }
   });
 
   // Estimate follow-ups - every hour
