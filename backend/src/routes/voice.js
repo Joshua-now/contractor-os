@@ -21,6 +21,15 @@ const activeCalls = new Map();
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+// Strip non-ASCII characters (emoji, symbols) that Polly TTS renders as "AA" or garbled audio.
+// Workflow names like "🛡️ Sentinel" become "Sentinel" — all meaningful text is ASCII anyway.
+function stripEmoji(text) {
+  return (text || '')
+    .replace(/[^\x00-\x7F]/g, ' ')  // replace non-ASCII with space
+    .replace(/\s+/g, ' ')           // collapse extra whitespace
+    .trim();
+}
+
 function telnyxAction(callControlId, action, payload = {}) {
   const token = process.env.TELNYX_API_KEY;
   return axios.post(
@@ -176,7 +185,7 @@ router.post('/webhook', async (req, res) => {
               callState.conversationHistory = updatedHistory;
               callState.state = shouldHangUp ? 'hanging_up' : 'listening';
               await telnyxAction(callControlId, 'speak', {
-                payload: reply,
+                payload: stripEmoji(reply),
                 voice: 'Polly.Matthew',
                 language: 'en-US',
               });
@@ -297,7 +306,7 @@ router.post('/webhook', async (req, res) => {
         callState.state = shouldHangUp ? 'hanging_up' : 'listening';
 
         await telnyxAction(callControlId, 'speak', {
-          payload: reply,
+          payload: stripEmoji(reply),
           voice: 'Polly.Matthew',
           language: 'en-US',
         });

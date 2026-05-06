@@ -15,8 +15,12 @@ async function startBriefingCall(contractor, briefingType) {
     ? `Good morning Joshua, it's Bob. Give me a second and I'll pull up your morning status.`
     : `Hey Joshua, Bob here. Pulling your evening status now — give me just a moment.`;
 
+  // Use BRIEFING_PHONE env var to route calls to the office phone instead of cell.
+  // Set BRIEFING_PHONE=+13214719858 in Railway env vars to call the office line.
+  const phone = process.env.BRIEFING_PHONE || contractor.phone;
+
   // Initiate the call — voice.js will handle the rest via webhook
-  const result = await makeCall(contractor.phone, webhookUrl);
+  const result = await makeCall(phone, webhookUrl);
 
   // Store briefing context so voice.js knows this is a briefing, not a simple outbound
   outboundQueue.set(result.callControlId, {
@@ -27,7 +31,7 @@ async function startBriefingCall(contractor, briefingType) {
     message: greeting,
   });
 
-  console.log(`[Heartbeat] ${briefingType} briefing call initiated to ${contractor.phone} | callControlId: ${result.callControlId}`);
+  console.log(`[Heartbeat] ${briefingType} briefing call initiated to ${phone} | callControlId: ${result.callControlId}`);
 }
 
 function startHeartbeat() {
