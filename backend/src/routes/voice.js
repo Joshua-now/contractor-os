@@ -13,7 +13,7 @@ const router = express.Router();
 const axios = require('axios');
 const pool = require('../db');
 const FormData = require('form-data');
-const { runConversation } = require('../fieldOffice');
+const { runConversation, buildSystemPrompt } = require('../fieldOffice');
 const outboundQueue = require('../outboundQueue');
 
 // In-memory store for active calls (call_control_id → state)
@@ -115,17 +115,21 @@ router.post('/webhook', async (req, res) => {
         if (direction === 'outgoing' || outboundQueue.has(callControlId)) {
           const outbound = outboundQueue.get(callControlId);
           if (outbound) {
-            console.log(`[Voice] Outbound answered by ${outbound.contactName} — speaking message`);
+            console.log(`[Voice] Outbound answered by ${outbound.contactName} — type: ${outbound.type || 'simple'}`);
             activeCalls.set(callControlId, {
               direction: 'outbound',
               state: 'speaking',
+              type: outbound.type || 'simple',
+              briefingType: outbound.briefingType,
+              contractorId: outbound.contractorId,
               contactName: outbound.contactName,
+              conversationHistory: [],
             });
             outboundQueue.delete(callControlId);
 
             await telnyxAction(callControlId, 'speak', {
               payload: outbound.message,
-              voice: 'female',
+              voice: 'Polly.Matthew',
               language: 'en-US',
             });
           } else {
@@ -141,8 +145,8 @@ router.post('/webhook', async (req, res) => {
 
         callState.state = 'greeting';
         await telnyxAction(callControlId, 'speak', {
-          payload: `Hey, Fluid Productions field office. What do you need?`,
-          voice: 'female',
+          payload: `Hey Joshua, it's Bob. What do you need?`,
+          voice: 'Polly.Matthew',
           language: 'en-US',
         });
         break;
@@ -153,8 +157,58 @@ router.post('/webhook', async (req, res) => {
         const callState = activeCalls.get(callControlId);
         if (!callState) break;
 
-        // OUTBOUND: message was spoken — hang up
+        // OUTBOUND
         if (callState.direction === 'outbound') {
+          // BRIEFING call: greeting spoken → now run the actual status report
+          if (callState.type === 'briefing' && callState.state === 'speaking') {
+            callState.state = 'thinking';
+            const briefingPrompt = callState.briefingType === 'morning'
+              ? 'Run the full morning status check — check all systems and give me a tight briefing.'
+              : 'Run the evening status check — focus on Instantly campaigns and n8n workflow health.';
+            try {
+              const contractor = { id: callState.contractorId, name: 'Joshua' };
+              const systemPrompt = buildSystemPrompt(contractor, 'briefing');
+              const { reply, shouldHangUp, updatedHistory } = await runConversation(
+                callState.contractorId,
+                callState.conversationHistory,
+                briefingPrompt
+              );
+              callState.conversationHistory = updatedHistory;
+              callState.state = shouldHangUp ? 'hanging_up' : 'listening';
+              await telnyxAction(callControlId, 'speak', {
+                payload: reply,
+                voice: 'Polly.Matthew',
+                language: 'en-US',
+              });
+            } catch (err) {
+              console.error('[Voice] Briefing runConversation error:', err.message);
+              await telnyxAction(callControlId, 'hangup');
+              activeCalls.delete(callControlId);
+            }
+            break;
+          }
+
+          // BRIEFING call: status spoken → start listening for follow-up
+          if (callState.type === 'briefing' && callState.state === 'listening') {
+            callState.state = 'recording';
+            await telnyxAction(callControlId, 'record_start', {
+              format: 'mp3',
+              channels: 'single',
+              trim_silence: true,
+              timeout_secs: 6,
+              max_length_secs: 120,
+            });
+            break;
+          }
+
+          // BRIEFING hang up
+          if (callState.type === 'briefing' && callState.state === 'hanging_up') {
+            await telnyxAction(callControlId, 'hangup');
+            activeCalls.delete(callControlId);
+            break;
+          }
+
+          // SIMPLE outbound: message was spoken — hang up
           console.log(`[Voice] Outbound message delivered to ${callState.contactName} — hanging up`);
           await telnyxAction(callControlId, 'hangup');
           activeCalls.delete(callControlId);
@@ -191,7 +245,7 @@ router.post('/webhook', async (req, res) => {
           callState.state = 'listening';
           await telnyxAction(callControlId, 'speak', {
             payload: "Sorry, I didn't catch that. Go ahead.",
-            voice: 'female',
+            voice: 'Polly.Matthew',
             language: 'en-US',
           });
           break;
@@ -207,7 +261,7 @@ router.post('/webhook', async (req, res) => {
           callState.state = 'listening';
           await telnyxAction(callControlId, 'speak', {
             payload: "Sorry, I had trouble hearing that. Try again.",
-            voice: 'female',
+            voice: 'Polly.Matthew',
             language: 'en-US',
           });
           break;
@@ -217,7 +271,7 @@ router.post('/webhook', async (req, res) => {
           callState.state = 'listening';
           await telnyxAction(callControlId, 'speak', {
             payload: "I didn't hear anything. What do you need?",
-            voice: 'female',
+            voice: 'Polly.Matthew',
             language: 'en-US',
           });
           break;
@@ -244,7 +298,7 @@ router.post('/webhook', async (req, res) => {
 
         await telnyxAction(callControlId, 'speak', {
           payload: reply,
-          voice: 'female',
+          voice: 'Polly.Matthew',
           language: 'en-US',
         });
         break;
