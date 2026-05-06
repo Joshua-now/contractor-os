@@ -920,7 +920,7 @@ async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 
   while (iterations < maxIterations) {
     iterations++;
     const response = await openRouterMessages({
-      model: 'anthropic/claude-opus-4-5',
+      model: 'anthropic/claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       system: systemPrompt,
       tools: FIELD_OFFICE_TOOLS,
