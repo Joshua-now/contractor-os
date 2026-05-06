@@ -194,8 +194,8 @@ router.post('/webhook', async (req, res) => {
             await telnyxAction(callControlId, 'record_start', {
               format: 'mp3',
               channels: 'single',
-              trim_silence: true,
-              timeout_secs: 6,
+              trim_silence: false,
+              timeout_secs: 8,
               max_length_secs: 120,
             });
             break;
@@ -221,8 +221,8 @@ router.post('/webhook', async (req, res) => {
           await telnyxAction(callControlId, 'record_start', {
             format: 'mp3',
             channels: 'single',
-            trim_silence: true,
-            timeout_secs: 5,
+            trim_silence: false,
+            timeout_secs: 8,
             max_length_secs: 120,
           });
         } else if (callState.state === 'hanging_up') {
