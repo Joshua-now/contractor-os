@@ -87,7 +87,9 @@ async function getInstantlyCampaigns() {
       params: { limit: 20, skip: 0 },
       timeout: 8000,
     });
-    return { ok: true, campaigns: resp.data?.campaigns || resp.data || [] };
+    const raw = resp.data;
+    const list = Array.isArray(raw) ? raw : (raw?.items || raw?.campaigns || raw?.data || []);
+    return { ok: true, campaigns: list };
   } catch (err) {
     return { ok: false, error: err.message };
   }
