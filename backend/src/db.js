@@ -76,6 +76,9 @@ async function initDB() {
                                                                                       )
                                                                                           `);
 
+          // Safe migration: add password_hash for multitenant auth
+          await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS password_hash TEXT`);
+
           // Safe migration: add lead_phone if it doesn't exist yet
           await client.query(`ALTER TABLE memory ADD COLUMN IF NOT EXISTS lead_phone TEXT`);
 

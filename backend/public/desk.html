@@ -282,9 +282,89 @@
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── LOGIN OVERLAY ── */
+  .login-overlay {
+    position: fixed; inset: 0;
+    background: rgba(13,17,23,0.97);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+  }
+  .login-overlay.hidden { display: none; }
+  .login-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 40px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+  }
+  .login-logo { font-size: 22px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+  .login-sub { font-size: 13px; color: var(--text2); margin-bottom: 28px; }
+  .login-label { font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px; display: block; }
+  .login-input {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 14px;
+    font-family: var(--font);
+    margin-bottom: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .login-input:focus { border-color: var(--accent2); }
+  .login-btn {
+    width: 100%;
+    background: var(--accent2);
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    padding: 11px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    margin-top: 4px;
+  }
+  .login-btn:hover { opacity: 0.85; }
+  .login-btn:disabled { opacity: 0.5; cursor: default; }
+  .login-error { font-size: 13px; color: var(--red); margin-top: 12px; min-height: 18px; }
+
+  /* logout button in header */
+  .btn-logout {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-logout:hover { border-color: var(--red); color: var(--red); }
 </style>
 </head>
 <body>
+
+<!-- LOGIN OVERLAY -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <div class="login-logo">⚡ Fluid Productions</div>
+    <div class="login-sub">Field Office Desk — sign in to continue</div>
+    <label class="login-label">Email</label>
+    <input class="login-input" type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email" />
+    <label class="login-label">Password</label>
+    <input class="login-input" type="password" id="loginPassword" placeholder="••••••••" autocomplete="current-password"
+      onkeydown="if(event.key==='Enter') doLogin()" />
+    <button class="login-btn" id="loginBtn" onclick="doLogin()">Sign In</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
 
 <!-- HEADER -->
 <div class="header">
@@ -294,6 +374,7 @@
     <div class="status-dot" id="systemDot"></div>
     <span class="status-label" id="systemLabel">Checking systems...</span>
     <button class="btn-refresh" onclick="loadStatus()">↻ Refresh</button>
+    <button class="btn-logout" onclick="logout()">Sign Out</button>
   </div>
 </div>
 
@@ -421,6 +502,94 @@
   const API = '';  // same origin — backend serves this file
   let sessionId = 'desk-' + Math.random().toString(36).substr(2, 9);
   let isThinking = false;
+  let _authToken = localStorage.getItem('desk_token') || null;
+  let _contractor = null;
+
+  // ── AUTH HELPERS ──
+  function authHeaders(extra = {}) {
+    return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _authToken, ...extra };
+  }
+
+  function showLogin() {
+    document.getElementById('loginOverlay').classList.remove('hidden');
+    document.getElementById('loginEmail').focus();
+  }
+
+  function hideLogin() {
+    document.getElementById('loginOverlay').classList.add('hidden');
+    document.getElementById('loginError').textContent = '';
+  }
+
+  async function doLogin() {
+    const email = document.getElementById('loginEmail').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    const btn = document.getElementById('loginBtn');
+    const errEl = document.getElementById('loginError');
+    if (!email || !password) { errEl.textContent = 'Email and password required.'; return; }
+    btn.disabled = true;
+    btn.textContent = 'Signing in...';
+    errEl.textContent = '';
+    try {
+      const res = await fetch(API + '/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { errEl.textContent = data.error || 'Login failed.'; return; }
+      _authToken = data.token;
+      _contractor = data.contractor;
+      localStorage.setItem('desk_token', _authToken);
+      hideLogin();
+      onLoggedIn();
+    } catch (err) {
+      errEl.textContent = 'Could not reach server.';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Sign In';
+    }
+  }
+
+  function logout() {
+    _authToken = null;
+    _contractor = null;
+    localStorage.removeItem('desk_token');
+    showLogin();
+  }
+
+  function handleUnauthorized() {
+    _authToken = null;
+    localStorage.removeItem('desk_token');
+    showLogin();
+  }
+
+  async function onLoggedIn() {
+    // Personalize welcome with contractor's name
+    const name = _contractor?.name?.split(' ')[0] || 'there';
+    const welcomeEl = document.getElementById('welcome');
+    if (welcomeEl) {
+      welcomeEl.querySelector('h2').textContent = 'Hey ' + name + ' 👋';
+    }
+    loadStatus();
+    document.getElementById('msgInput').focus();
+  }
+
+  // ── INIT: check stored token ──
+  async function initAuth() {
+    if (!_authToken) { showLogin(); return; }
+    try {
+      const res = await fetch(API + '/api/auth/me', {
+        headers: { 'Authorization': 'Bearer ' + _authToken }
+      });
+      if (!res.ok) { handleUnauthorized(); return; }
+      const data = await res.json();
+      _contractor = data.contractor;
+      hideLogin();
+      onLoggedIn();
+    } catch {
+      showLogin();
+    }
+  }
 
   // ── AUTO-RESIZE TEXTAREA ──
   function autoResize(el) {
@@ -466,9 +635,10 @@
     try {
       const res = await fetch(API + '/api/desk/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ message: text, sessionId, mode: 'sales' }),
       });
+      if (res.status === 401) { removeTyping(typingId); handleUnauthorized(); return; }
       const data = await res.json();
       removeTyping(typingId);
       if (data.error) {
@@ -536,13 +706,14 @@
   async function newChat() {
     await fetch(API + '/api/desk/clear', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(),
       body: JSON.stringify({ sessionId }),
     }).catch(() => {});
     sessionId = 'desk-' + Math.random().toString(36).substr(2, 9);
+    const name = _contractor?.name?.split(' ')[0] || 'there';
     const msgs = document.getElementById('messages');
     msgs.innerHTML = `<div class="welcome" id="welcome">
-      <h2>Hey Joshua 👋</h2>
+      <h2>Hey ${name} 👋</h2>
       <p>Fresh session started. What do you need?</p>
       <div class="welcome-chips">
         <div class="chip" onclick="quickSend('What sold this week?')">What sold this week?</div>
@@ -553,6 +724,7 @@
 
   // ── LOAD SYSTEM STATUS ──
   async function loadStatus() {
+    if (!_authToken) return;
     const systemLabel = document.getElementById('systemLabel');
     systemLabel.textContent = 'Checking...';
 
@@ -563,7 +735,8 @@
     setBadge('slack', 'loading', '...');
 
     try {
-      const res = await fetch(API + '/api/desk/status');
+      const res = await fetch(API + '/api/desk/status', { headers: { 'Authorization': 'Bearer ' + _authToken } });
+      if (res.status === 401) { handleUnauthorized(); return; }
       const d = await res.json();
 
       // Backend
@@ -645,9 +818,8 @@
   }
 
   // ── INIT ──
-  loadStatus();
   setInterval(loadStatus, 60000);  // refresh every minute
-  document.getElementById('msgInput').focus();
+  initAuth();  // check token → show login or proceed
 </script>
 </body>
 </html>

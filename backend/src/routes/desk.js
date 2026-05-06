@@ -14,6 +14,7 @@ const { runAgentLoop } = require('../agent');
 const { runConversation } = require('../fieldOffice');
 const axios = require('axios');
 const pool = require('../db');
+const requireAuth = require('../middleware/auth');
 
 // In-memory session store for sales desk mode
 const sessions = new Map();
@@ -24,24 +25,19 @@ const DESK_TEST_PHONE = '+10000000001';
 
 // ─── CHAT ENDPOINT ──────────────────────────────────────────────────────────
 // POST /api/desk/chat
+// Headers: Authorization: Bearer <jwt>
 // Body: { message: string, sessionId: string, mode: 'contractor' | 'sales' }
-router.post('/chat', async (req, res) => {
+router.post('/chat', requireAuth, async (req, res) => {
           try {
                       const { message, sessionId, mode, docContext } = req.body;
                       if (!message) return res.status(400).json({ error: 'message required' });
 
             const sid = sessionId || 'default';
 
-            // Look up Joshua's contractor record
-            const { rows: [cRow] } = await pool.query(
-                          "SELECT * FROM contractors WHERE phone = '+13212055991' LIMIT 1"
-                        );
+            // Contractor identity comes from the verified JWT via requireAuth middleware
+            const cRow = req.contractor;
 
-            if (!cRow) {
-                          return res.status(500).json({ error: 'Contractor record not found. Run seed first.' });
-            }
-
-            // SALES DESK MODE: Joshua's Fluid Productions assistant
+            // SALES DESK MODE: contractor's Fluid Productions assistant
             if (mode === 'sales') {
                           const history = sessions.get(sid) || [];
                           const { reply, shouldHangUp, updatedHistory } = await runConversation(
@@ -67,7 +63,7 @@ router.post('/chat', async (req, res) => {
 
 // ─── CLEAR SESSION ────────────────────────────────────────────────────────────
 // POST /api/desk/clear
-router.post('/clear', (req, res) => {
+router.post('/clear', requireAuth, (req, res) => {
           const { sessionId } = req.body;
           if (sessionId) sessions.delete(sessionId);
           else sessions.clear();
@@ -76,7 +72,7 @@ router.post('/clear', (req, res) => {
 
 // ─── SYSTEM STATUS ────────────────────────────────────────────────────────────
 // GET /api/desk/status
-router.get('/status', async (req, res) => {
+router.get('/status', requireAuth, async (req, res) => {
           const results = {};
 
              // Check Switchboard
