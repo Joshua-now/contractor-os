@@ -55,7 +55,8 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
       const fields = ['name', 'company_name', 'email', 'phone', 'service_area',
                           'telnyx_phone', 'twilio_phone', 'sms_provider', 'ghl_location_id',
-                          'ghl_contact_id', 'ai_persona', 'services', 'plan', 'active', 'onboarded'];
+                          'ghl_contact_id', 'ai_persona', 'services', 'plan', 'active', 'onboarded',
+                          'bob_enabled'];
       const updates = [];
       const values = [];
       let i = 1;
