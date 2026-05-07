@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
 import { Settings as SettingsIcon, Save, LogOut } from 'lucide-react'
 
-export default function Settings({ contractorId, apiUrl }) {
-  const [contractor, setContractor] = useState(null)
-  const [form, setForm] = useState({})
+export default function Settings({ auth, apiUrl, onLogout }) {
+  const contractorId = auth.contractor.id
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + auth.token }
+  const [contractor, setContractor] = useState(auth.contractor)
+  const [form, setForm] = useState(auth.contractor)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
-    fetch(`${apiUrl}/api/contractors/${contractorId}`)
+    fetch(`${apiUrl}/api/contractors/${contractorId}`, { headers })
       .then(r => r.json())
       .then(data => { setContractor(data); setForm(data) })
       .catch(console.error)
@@ -19,7 +21,7 @@ export default function Settings({ contractorId, apiUrl }) {
     try {
       await fetch(`${apiUrl}/api/contractors/${contractorId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(form)
       })
       setSaved(true)
@@ -31,10 +33,7 @@ export default function Settings({ contractorId, apiUrl }) {
     }
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem('contractorId')
-    window.location.reload()
-  }
+  const handleLogout = onLogout || (() => { localStorage.clear(); window.location.reload() })
 
   if (!contractor) return <div className="text-gray-400">Loading settings...</div>
 

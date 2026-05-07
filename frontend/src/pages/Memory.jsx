@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { Brain, Plus, Trash2, Edit3, Check, X } from 'lucide-react'
 
-export default function Memory({ contractorId, apiUrl }) {
+export default function Memory({ auth, apiUrl }) {
+  const contractorId = auth.contractor.id
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + auth.token }
   const [memory, setMemory] = useState([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(null)
@@ -10,7 +12,7 @@ export default function Memory({ contractorId, apiUrl }) {
 
   const fetchMemory = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/memory/${contractorId}`)
+      const res = await fetch(`${apiUrl}/api/memory/${contractorId}`, { headers })
       setMemory(await res.json())
     } catch (err) {
       console.error(err)
@@ -25,7 +27,7 @@ export default function Memory({ contractorId, apiUrl }) {
     try {
       await fetch(`${apiUrl}/api/memory/${contractorId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(entry)
       })
       await fetchMemory()
@@ -39,7 +41,7 @@ export default function Memory({ contractorId, apiUrl }) {
 
   const deleteEntry = async (key) => {
     try {
-      await fetch(`${apiUrl}/api/memory/${contractorId}/${key}`, { method: 'DELETE' })
+      await fetch(`${apiUrl}/api/memory/${contractorId}/${key}`, { method: 'DELETE', headers })
       setMemory(memory.filter(m => m.key !== key))
     } catch (err) {
       console.error(err)

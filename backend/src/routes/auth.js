@@ -15,11 +15,11 @@ const pool = require('../db');
 const requireAuth = require('../middleware/auth');
 
 // ─── Helper: sign a JWT for a contractor ────────────────────────────────────
-function signToken(contractorId, email) {
+function signToken(contractorId, email, role = 'contractor') {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error('JWT_SECRET env var not set');
   return jwt.sign(
-    { contractorId, email },
+    { contractorId, email, role },
     secret,
     { expiresIn: '24h' }
   );
@@ -53,7 +53,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const token = signToken(contractor.id, contractor.email);
+    const token = signToken(contractor.id, contractor.email, contractor.role || 'contractor');
 
     return res.json({
       token,
@@ -63,6 +63,7 @@ router.post('/login', async (req, res) => {
         email: contractor.email,
         company_name: contractor.company_name,
         plan: contractor.plan,
+        role: contractor.role || 'contractor',
         ai_persona: contractor.ai_persona,
         service_area: contractor.service_area,
       }
@@ -93,7 +94,7 @@ router.post('/provision', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const { name, email, password, company_name, phone, plan } = req.body;
+    const { name, email, password, company_name, phone, plan, role } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'name, email, and password required' });
     }
@@ -118,20 +119,21 @@ router.post('/provision', async (req, res) => {
 
     // Create new contractor
     const { rows: [newContractor] } = await pool.query(
-      `INSERT INTO contractors (name, email, company_name, phone, plan, password_hash, active, onboarded)
-       VALUES ($1, $2, $3, $4, $5, $6, true, false)
-       RETURNING id, name, email, company_name, plan`,
+      `INSERT INTO contractors (name, email, company_name, phone, plan, role, password_hash, active, onboarded)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true, false)
+       RETURNING id, name, email, company_name, plan, role`,
       [
         name,
         email.toLowerCase().trim(),
         company_name || null,
         phone || null,
         plan || 'trial',
+        role || 'contractor',
         password_hash
       ]
     );
 
-    const token = signToken(newContractor.id, newContractor.email);
+    const token = signToken(newContractor.id, newContractor.email, newContractor.role);
 
     return res.status(201).json({
       ok: true,

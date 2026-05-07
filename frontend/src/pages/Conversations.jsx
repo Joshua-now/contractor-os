@@ -1,14 +1,17 @@
 import { useState, useEffect } from 'react'
 import { MessageSquare, Phone, Mail, RefreshCw } from 'lucide-react'
 
-export default function Conversations({ contractorId, apiUrl }) {
+export default function Conversations({ auth, apiUrl }) {
+  const contractorId = auth.contractor.id
   const [conversations, setConversations] = useState([])
   const [selected, setSelected] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const fetchConversations = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/conversations/${contractorId}`)
+      const res = await fetch(`${apiUrl}/api/conversations/${contractorId}`, {
+        headers: { 'Authorization': 'Bearer ' + auth.token }
+      })
       setConversations(await res.json())
     } catch (err) {
       console.error(err)

@@ -4,7 +4,8 @@ const cors = require('cors');
 const path = require('path');
 const db = require('./db');
 const agentRoutes = require('./routes/agent');
-const authRoutes = require('./routes/auth');
+const authRoutes  = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
 const contractorRoutes = require('./routes/contractors');
 const conversationRoutes = require('./routes/conversations');
 const memoryRoutes = require('./routes/memory');
@@ -28,7 +29,8 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 // Routes
-app.use('/api/auth', authRoutes);
+app.use('/api/auth',  authRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/contractors', contractorRoutes);
 app.use('/api/conversations', conversationRoutes);
