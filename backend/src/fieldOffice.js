@@ -1044,7 +1044,7 @@ async function runLLMLoop(contractorId, messages, systemPrompt, maxIterations = 
   while (iterations < maxIterations) {
     iterations++;
     const response = await openRouterMessages({
-      model: 'anthropic/claude-3-5-sonnet-20241022',
+      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       system: systemPrompt,
       tools: FIELD_OFFICE_TOOLS,
@@ -1092,12 +1092,12 @@ async function runFieldOffice(contractorId, transcript) {
 }
 
 // ─── CONVERSATION MODE ────────────────────────────────────────────────────────
-async function runConversation(contractorId, conversationHistory, userMessage) {
-  console.log(`[FieldOffice] Conversation turn for ${contractorId}: "${userMessage}"`);
+async function runConversation(contractorId, conversationHistory, userMessage, mode = 'conversation') {
+  console.log(`[FieldOffice] Conversation turn for ${contractorId} (mode: ${mode}): "${userMessage}"`);
   const contractorResult = await pool.query('SELECT * FROM contractors WHERE id = $1', [contractorId]);
   const contractor = contractorResult.rows[0];
   if (!contractor) throw new Error(`Contractor ${contractorId} not found`);
-  const systemPrompt = buildSystemPrompt(contractor, 'conversation');
+  const systemPrompt = buildSystemPrompt(contractor, mode);
   const messages = [...conversationHistory, { role: 'user', content: userMessage }];
   const { finalText, messages: updatedMessages } = await runLLMLoop(contractorId, messages, systemPrompt);
   const shouldHangUp = finalText.includes('[END_CALL]');

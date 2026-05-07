@@ -13,7 +13,7 @@ const router = express.Router();
 const axios = require('axios');
 const pool = require('../db');
 const FormData = require('form-data');
-const { runConversation, buildSystemPrompt } = require('../fieldOffice');
+const { runConversation } = require('../fieldOffice');
 const outboundQueue = require('../outboundQueue');
 
 // In-memory store for active calls (call_control_id → state)
@@ -175,12 +175,11 @@ router.post('/webhook', async (req, res) => {
               ? 'Run the full morning status check — check all systems and give me a tight briefing.'
               : 'Run the evening status check — focus on Instantly campaigns and n8n workflow health.';
             try {
-              const contractor = { id: callState.contractorId, name: 'Joshua' };
-              const systemPrompt = buildSystemPrompt(contractor, 'briefing');
               const { reply, shouldHangUp, updatedHistory } = await runConversation(
                 callState.contractorId,
                 callState.conversationHistory,
-                briefingPrompt
+                briefingPrompt,
+                'briefing'
               );
               callState.conversationHistory = updatedHistory;
               callState.state = shouldHangUp ? 'hanging_up' : 'listening';
@@ -191,8 +190,19 @@ router.post('/webhook', async (req, res) => {
               });
             } catch (err) {
               console.error('[Voice] Briefing runConversation error:', err.message);
-              await telnyxAction(callControlId, 'hangup');
-              activeCalls.delete(callControlId);
+              // Don't hang up silently — tell Joshua what happened and stay on the line
+              callState.state = 'listening';
+              try {
+                await telnyxAction(callControlId, 'speak', {
+                  payload: "Sorry Joshua, I hit a snag pulling your status — probably an API timeout. Go ahead and ask me something directly and I'll take care of it.",
+                  voice: 'Polly.Matthew',
+                  language: 'en-US',
+                });
+              } catch (e2) {
+                console.error('[Voice] Fallback speak failed, hanging up:', e2.message);
+                await telnyxAction(callControlId, 'hangup');
+                activeCalls.delete(callControlId);
+              }
             }
             break;
           }
