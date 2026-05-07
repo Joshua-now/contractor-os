@@ -109,12 +109,13 @@ router.post('/provision', async (req, res) => {
     const password_hash = await bcrypt.hash(password, saltRounds);
 
     if (existing.length > 0) {
-      // Update existing contractor's password
+      // Update existing contractor's password AND role
       await pool.query(
-        'UPDATE contractors SET password_hash = $1, updated_at = NOW() WHERE email = $2',
-        [password_hash, email.toLowerCase().trim()]
+        'UPDATE contractors SET password_hash = $1, role = $2, updated_at = NOW() WHERE email = $3',
+        [password_hash, role || 'contractor', email.toLowerCase().trim()]
       );
-      return res.json({ ok: true, action: 'password_updated', contractorId: existing[0].id });
+      const token = signToken(existing[0].id, email.toLowerCase().trim(), role || 'contractor');
+      return res.json({ ok: true, action: 'password_updated', contractorId: existing[0].id, token });
     }
 
     // Create new contractor

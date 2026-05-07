@@ -21,7 +21,7 @@ async function requireAuth(req, res, next) {
 
     // Fetch fresh contractor record so req.contractor always has current data
     const { rows: [contractor] } = await pool.query(
-      'SELECT id, name, company_name, email, phone, telnyx_phone, sms_provider, plan, active, ai_persona, service_area, services, review_link, ghl_location_id FROM contractors WHERE id = $1 AND active = true',
+      'SELECT id, name, company_name, email, phone, telnyx_phone, sms_provider, plan, role, active, ai_persona, service_area, services, review_link, ghl_location_id FROM contractors WHERE id = $1 AND active = true',
       [payload.contractorId]
     );
 

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Zap, Mail, Lock, AlertCircle } from 'lucide-react'
+import { Zap, AlertCircle } from 'lucide-react'
 
 export default function Login({ apiUrl, onLogin }) {
   const [email, setEmail]       = useState('')
@@ -29,82 +29,125 @@ export default function Login({ apiUrl, onLogin }) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: '#030712' }}>
-      <div className="w-full max-w-sm">
+    <div style={{
+      minHeight: '100vh',
+      background: 'linear-gradient(135deg, #0a0f1a 0%, #0f172a 50%, #0a0f1a 100%)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '24px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    }}>
+      <div style={{ width: '100%', maxWidth: '460px' }}>
 
         {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl mb-4"
-            style={{ background: 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}>
-            <Zap className="w-7 h-7 text-white" />
+        <div style={{ textAlign: 'center', marginBottom: '40px' }}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: '64px', height: '64px', borderRadius: '16px', marginBottom: '16px',
+            background: 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+          }}>
+            <Zap style={{ width: '32px', height: '32px', color: 'white' }} />
           </div>
-          <h1 className="text-2xl font-bold text-white">Contractor OS</h1>
-          <p className="text-gray-500 text-sm mt-1">Sign in to your AI workspace</p>
+          <div style={{ fontSize: '28px', fontWeight: '800', color: 'white', letterSpacing: '-0.5px' }}>
+            Contractor OS
+          </div>
+          <div style={{ fontSize: '15px', color: '#64748b', marginTop: '6px' }}>
+            Sign in to your AI workspace
+          </div>
         </div>
 
         {/* Card */}
-        <form onSubmit={handleSubmit}
-          className="rounded-2xl p-6 space-y-4"
-          style={{ background: '#0f172a', border: '1px solid #1e293b' }}>
+        <form onSubmit={handleSubmit} style={{
+          background: '#0f172a',
+          border: '1px solid #1e293b',
+          borderRadius: '20px',
+          padding: '40px',
+          boxShadow: '0 32px 64px rgba(0,0,0,0.5)',
+        }}>
 
           {/* Email */}
-          <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1.5">Email</label>
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="you@company.com"
-                autoComplete="email"
-                className="w-full pl-9 pr-4 py-2.5 rounded-lg text-sm text-white placeholder-gray-600 outline-none focus:ring-1 focus:ring-purple-500"
-                style={{ background: '#1e293b', border: '1px solid #334155' }}
-              />
-            </div>
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', color: '#94a3b8', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Email Address
+            </label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@company.com"
+              autoComplete="email"
+              autoFocus
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                background: '#1e293b', border: '1px solid #334155',
+                borderRadius: '10px', color: 'white',
+                padding: '14px 16px', fontSize: '15px',
+                outline: 'none', transition: 'border-color 0.2s',
+              }}
+              onFocus={e => e.target.style.borderColor = '#7c3aed'}
+              onBlur={e => e.target.style.borderColor = '#334155'}
+            />
           </div>
 
           {/* Password */}
-          <div>
-            <label className="block text-sm font-medium text-gray-400 mb-1.5">Password</label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="••••••••"
-                autoComplete="current-password"
-                onKeyDown={e => e.key === 'Enter' && handleSubmit(e)}
-                className="w-full pl-9 pr-4 py-2.5 rounded-lg text-sm text-white placeholder-gray-600 outline-none focus:ring-1 focus:ring-purple-500"
-                style={{ background: '#1e293b', border: '1px solid #334155' }}
-              />
-            </div>
+          <div style={{ marginBottom: '28px' }}>
+            <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', color: '#94a3b8', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Password
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              autoComplete="current-password"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                background: '#1e293b', border: '1px solid #334155',
+                borderRadius: '10px', color: 'white',
+                padding: '14px 16px', fontSize: '15px',
+                outline: 'none', transition: 'border-color 0.2s',
+              }}
+              onFocus={e => e.target.style.borderColor = '#7c3aed'}
+              onBlur={e => e.target.style.borderColor = '#334155'}
+            />
           </div>
 
           {/* Error */}
           {error && (
-            <div className="flex items-center gap-2 text-red-400 text-sm p-3 rounded-lg"
-              style={{ background: 'rgba(239,68,68,0.1)' }}>
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              color: '#f87171', fontSize: '14px',
+              background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)',
+              borderRadius: '10px', padding: '12px 16px', marginBottom: '20px',
+            }}>
+              <AlertCircle style={{ width: '18px', height: '18px', flexShrink: 0 }} />
               {error}
             </div>
           )}
 
-          {/* Submit */}
+          {/* Button */}
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 rounded-lg font-semibold text-white text-sm transition-opacity disabled:opacity-50"
-            style={{ background: 'linear-gradient(135deg, #7c3aed, #4f46e5)' }}
+            style={{
+              width: '100%', padding: '15px',
+              background: loading ? '#4c1d95' : 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+              border: 'none', borderRadius: '10px',
+              color: 'white', fontSize: '16px', fontWeight: '700',
+              cursor: loading ? 'default' : 'pointer',
+              opacity: loading ? 0.8 : 1,
+              transition: 'opacity 0.2s',
+              letterSpacing: '0.2px',
+            }}
           >
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? 'Signing in...' : 'Sign In →'}
           </button>
         </form>
 
-        <p className="text-center text-gray-600 text-xs mt-6">
+        <div style={{ textAlign: 'center', color: '#334155', fontSize: '13px', marginTop: '24px' }}>
           Need access? Contact your Fluid Productions rep.
-        </p>
+        </div>
       </div>
     </div>
   )
