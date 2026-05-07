@@ -308,6 +308,138 @@ async function checkGuardianSentinel() {
   }
 }
 
+// ─── SELF-HEALING HELPERS ────────────────────────────────────────────────────
+
+async function clearStuckSwitchboardCalls() {
+  const base = process.env.SWITCHBOARD_URL;
+  if (!base) return { ok: false, error: 'SWITCHBOARD_URL not set', cleared: 0 };
+  try {
+    const resp = await axios.post(
+      `${base}/api/admin/cleanup`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.SWITCHBOARD_API_KEY}`,
+          ...(process.env.WATCHDOG_SECRET && { 'X-Watchdog-Secret': process.env.WATCHDOG_SECRET }),
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      }
+    );
+    const cleared = resp.data?.cleared ?? resp.data?.cleaned ?? 0;
+    return { ok: true, cleared };
+  } catch (err) {
+    return { ok: false, error: err.message, cleared: 0 };
+  }
+}
+
+async function resumeInstantlyCampaign(campaignId) {
+  try {
+    await axios.post(
+      `https://api.instantly.ai/api/v2/campaigns/${campaignId}/resume`,
+      {},
+      {
+        headers: { Authorization: `Bearer ${process.env.INSTANTLY_API_KEY}` },
+        timeout: 8000,
+      }
+    );
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// ─── AUTONOMOUS HEALTH SWEEP ──────────────────────────────────────────────────
+// Called by heartbeat.js on a schedule. Checks everything, auto-fixes what it can.
+// Returns { fixed[], failed[], ok[] } — heartbeat decides whether to SMS Joshua.
+
+async function runAutonomousHealthSweep(contractorId) {
+  const fixed = [];
+  const failed = [];
+  const ok = [];
+
+  // 1. n8n — find errored executions and restart the affected workflows
+  try {
+    const n8nResult = await getN8nWorkflows();
+    if (!n8nResult.ok) {
+      failed.push(`n8n unreachable: ${n8nResult.error}`);
+    } else {
+      const errors = n8nResult.recentExecutions.filter(e => e.status === 'error');
+      if (errors.length === 0) {
+        const activeCount = n8nResult.workflows.filter(w => w.active).length;
+        ok.push(`n8n: ${activeCount} workflows active, no errors`);
+      } else {
+        for (const failure of errors) {
+          const wfName = failure.workflow || 'unknown';
+          try {
+            const restart = await triggerN8nWorkflow(wfName, 'restart');
+            if (restart.ok) {
+              fixed.push(`Restarted n8n "${wfName}" after error`);
+            } else {
+              failed.push(`Could not restart "${wfName}": ${restart.error}`);
+            }
+          } catch (err) {
+            failed.push(`n8n restart failed for "${wfName}": ${err.message}`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    failed.push(`n8n sweep error: ${err.message}`);
+  }
+
+  // 2. Switchboard — clear any calls stuck IN_PROGRESS
+  try {
+    const switchResult = await clearStuckSwitchboardCalls();
+    if (switchResult.ok) {
+      if (switchResult.cleared > 0) {
+        fixed.push(`Cleared ${switchResult.cleared} stuck call(s) in Switchboard`);
+      } else {
+        ok.push('Switchboard: no stuck calls');
+      }
+    } else {
+      failed.push(`Switchboard cleanup failed: ${switchResult.error}`);
+    }
+  } catch (err) {
+    failed.push(`Switchboard sweep error: ${err.message}`);
+  }
+
+  // 3. Instantly — report paused campaigns (don't auto-resume; may be intentional)
+  try {
+    const instantlyResult = await getInstantlyCampaigns();
+    if (instantlyResult.ok) {
+      const paused = instantlyResult.campaigns.filter(c => c.status !== 1);
+      if (paused.length === 0) {
+        ok.push(`Instantly: all ${instantlyResult.campaigns.length} campaign(s) active`);
+      } else {
+        failed.push(`${paused.length} campaign(s) paused: ${paused.map(c => c.name).join(', ')}`);
+      }
+    } else {
+      failed.push(`Instantly unreachable: ${instantlyResult.error}`);
+    }
+  } catch (err) {
+    failed.push(`Instantly sweep error: ${err.message}`);
+  }
+
+  // 4. Railway — ping every service, report anything offline
+  try {
+    const railwayResults = await checkRailwayServices();
+    const offline = railwayResults.filter(s => s.status === 'offline');
+    const online = railwayResults.filter(s => s.status === 'online');
+    if (offline.length === 0) {
+      ok.push(`Railway: all ${online.length} services online`);
+    } else {
+      for (const s of offline) {
+        failed.push(`${s.name} is OFFLINE`);
+      }
+    }
+  } catch (err) {
+    failed.push(`Railway sweep error: ${err.message}`);
+  }
+
+  return { timestamp: new Date().toISOString(), fixed, failed, ok };
+}
+
 // ─── FIELD OFFICE TOOLS ───────────────────────────────────────────────────────
 const FIELD_OFFICE_TOOLS = [
   {
@@ -486,10 +618,35 @@ const FIELD_OFFICE_TOOLS = [
   },
   {
     name: 'check_guardian_sentinel',
-    description: 'Check the last runs of Guardian and Sentinel — the self-healing AI agents that monitor and fix the automation stack. Shows whether they ran, what status they finished with, and any errors they hit.',
+    description: 'Check whether Guardian/Sentinel n8n workflows are still active (these are being phased out — Bob now handles health monitoring directly). Use if Joshua asks about them specifically.',
     input_schema: {
       type: 'object',
       properties: {},
+    },
+  },
+  {
+    name: 'clear_stuck_calls',
+    description: 'Clear any calls that are stuck IN_PROGRESS in Switchboard. Use when Joshua reports calls not connecting, when a call seems frozen, or after any Switchboard issue. Safe to run anytime — only affects calls stuck longer than expected.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'resume_instantly_campaign',
+    description: 'Resume a paused Instantly email campaign by name or ID. Use when Joshua asks to restart a campaign or when check_instantly shows a campaign that should be running but is paused.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        campaign_name: {
+          type: 'string',
+          description: 'Campaign name or partial name — will look up the ID automatically',
+        },
+        campaign_id: {
+          type: 'string',
+          description: 'Campaign ID if you already have it from check_instantly',
+        },
+      },
     },
   },
   {
@@ -867,6 +1024,36 @@ async function executeTool(toolName, toolInput, contractorId) {
       return await checkGuardianSentinel();
     }
 
+    case 'clear_stuck_calls': {
+      const result = await clearStuckSwitchboardCalls();
+      if (!result.ok) return { error: `Switchboard cleanup failed: ${result.error}` };
+      return {
+        success: true,
+        cleared: result.cleared,
+        message: result.cleared > 0
+          ? `Cleared ${result.cleared} stuck call(s) from Switchboard`
+          : 'No stuck calls — Switchboard is clean',
+      };
+    }
+
+    case 'resume_instantly_campaign': {
+      const { campaign_name, campaign_id } = toolInput;
+      let id = campaign_id;
+      if (!id && campaign_name) {
+        const campaigns = await getInstantlyCampaigns();
+        if (!campaigns.ok) return { error: `Could not fetch campaigns: ${campaigns.error}` };
+        const match = campaigns.campaigns.find(c =>
+          c.name?.toLowerCase().includes(campaign_name.toLowerCase())
+        );
+        if (!match) return { error: `No campaign found matching "${campaign_name}"` };
+        id = match.id;
+      }
+      if (!id) return { error: 'Need a campaign_name or campaign_id' };
+      const result = await resumeInstantlyCampaign(id);
+      if (!result.ok) return { error: `Resume failed: ${result.error}` };
+      return { success: true, message: `Campaign resumed successfully` };
+    }
+
     case 'make_outbound_call': {
       const { phone_number, contact_name, message } = toolInput;
       const selfUrl = process.env.SELF_URL || 'https://frontend-production-33e9.up.railway.app';
@@ -991,11 +1178,10 @@ New Lead → Demo Scheduled → Proposal Sent → Trial Started → Closed Won �
 YOUR SYSTEMS (you can monitor AND control all of these):
 - Switchboard: AI call platform (Anna = Speed to Lead bot, Maya = After Hours bot)
 - n8n: Automation workflows — you can restart any of them if they break
-- Instantly: Cold email outreach campaigns
+- Instantly: Cold email outreach campaigns — you can resume paused campaigns
 - Slack: #hand-raises channel for hot leads, #alerts for system issues
 - GHL (GoHighLevel): CRM and pipeline
 - Railway: Infrastructure hosting — you can ping each service to check health
-- Guardian & Sentinel: Self-healing AI agents that monitor and auto-fix the automation stack
 
 YOUR CAPABILITIES:
 - Look up any contact or prospect in GHL
@@ -1003,8 +1189,10 @@ YOUR CAPABILITIES:
 - Move deals through the pipeline
 - Schedule follow-ups
 - Check all system health (Railway, n8n, Switchboard, Instantly, Slack)
-- Restart broken n8n workflows
-- Check whether Guardian/Sentinel ran and what they fixed
+- Restart broken n8n workflows automatically
+- Clear stuck calls from Switchboard
+- Resume paused Instantly campaigns
+- Run hourly autonomous health sweeps — fixes what it can, SMS Joshua what it can't
 - Make outbound calls to customers (Bob's number: (321) 465-7132)
 
 YOUR JOB:
@@ -1105,4 +1293,4 @@ async function runConversation(contractorId, conversationHistory, userMessage, m
   return { reply, shouldHangUp, updatedHistory: updatedMessages };
 }
 
-module.exports = { runFieldOffice, runConversation, buildSystemPrompt };
+module.exports = { runFieldOffice, runConversation, buildSystemPrompt, runAutonomousHealthSweep };

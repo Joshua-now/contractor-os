@@ -187,4 +187,50 @@ router.post('/set-password', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/auth/profile ───────────────────────────────────────────────────
+// Returns own contractor profile — safe alternative to /api/contractors/:id
+router.get('/profile', requireAuth, (req, res) => {
+  res.json(req.contractor);
+});
+
+// ─── PUT /api/auth/profile ───────────────────────────────────────────────────
+// Contractor updates their own safe profile fields (cannot change plan, role, active)
+router.put('/profile', requireAuth, async (req, res) => {
+  const ALLOWED = [
+    'name', 'company_name', 'phone', 'ai_persona', 'service_area', 'services',
+    'review_link', 'ghl_location_id', 'ghl_contact_id', 'telnyx_phone', 'twilio_phone',
+    'sms_provider', 'bob_enabled', 'crm_type', 'crm_api_key', 'crm_account_id', 'onboarded',
+  ];
+  const updates = [];
+  const values  = [];
+  let i = 1;
+
+  for (const field of ALLOWED) {
+    if (req.body[field] !== undefined) {
+      updates.push(`${field} = $${i++}`);
+      values.push(req.body[field]);
+    }
+  }
+
+  if (!updates.length) {
+    return res.status(400).json({ error: 'No updatable fields provided' });
+  }
+
+  try {
+    const { rows: [updated] } = await pool.query(
+      `UPDATE contractors SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE id = $${i} AND active = true RETURNING
+         id, name, company_name, email, phone, telnyx_phone, sms_provider,
+         plan, role, active, bob_enabled, ai_persona, service_area, services,
+         review_link, ghl_location_id, crm_type, crm_account_id, onboarded`,
+      [...values, req.contractor.id]
+    );
+    if (!updated) return res.status(404).json({ error: 'Not found' });
+    res.json(updated);
+  } catch (err) {
+    console.error('[Auth] Profile update error:', err.message);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
 module.exports = router;

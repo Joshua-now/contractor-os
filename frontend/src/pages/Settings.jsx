@@ -10,16 +10,16 @@ export default function Settings({ auth, apiUrl, onLogout }) {
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
-    fetch(`${apiUrl}/api/contractors/${contractorId}`, { headers })
+    fetch(`${apiUrl}/api/auth/profile`, { headers })
       .then(r => r.json())
       .then(data => { setContractor(data); setForm(data) })
       .catch(console.error)
-  }, [contractorId, apiUrl])
+  }, [apiUrl])
 
   const handleSave = async () => {
     setSaving(true)
     try {
-      await fetch(`${apiUrl}/api/contractors/${contractorId}`, {
+      await fetch(`${apiUrl}/api/auth/profile`, {
         method: 'PUT',
         headers,
         body: JSON.stringify(form)

@@ -11,15 +11,70 @@ const PROVIDERS = {
   openrouter: {
     name: 'OpenRouter',
     baseURL: 'https://openrouter.ai/api/v1',
-    defaultModel: 'anthropic/claude-sonnet-4-5',
+    defaultModel: 'anthropic/claude-sonnet-4-5-20250929',
     apiKeyEnv: 'OPENROUTER_API_KEY'
   },
   anthropic: {
     name: 'Anthropic',
-    defaultModel: 'claude-sonnet-4-5',
+    defaultModel: 'claude-sonnet-4-5-20250929',
     apiKeyEnv: 'ANTHROPIC_API_KEY'
   }
 };
+
+// ─── SMART MODEL ROUTING ─────────────────────────────────────────────────────
+// Tier 1 — Fast/cheap:  GPT-4o-mini  (simple questions, short inputs)
+// Tier 2 — Standard:    Sonnet        (conversations, booking, most tasks)
+// Tier 3 — Complex:     Opus          (strategy, multi-step reasoning)
+
+const MODELS = {
+  fast:    'openai/gpt-4o-mini',
+  sonnet:  'anthropic/claude-sonnet-4-5-20250929',
+  opus:    'anthropic/claude-opus-4-5-20251101'
+};
+
+const SIMPLE_KEYWORDS = [
+  'hi', 'hello', 'hey', 'yes', 'no', 'ok', 'okay', 'thanks', 'thank you',
+  'sure', 'got it', 'sounds good', 'perfect', 'great', 'when', 'where',
+  'what time', 'how much', 'price', 'cost', 'hours', 'open', 'available'
+];
+
+const COMPLEX_KEYWORDS = [
+  'strategy', 'analyze', 'analyse', 'architect', 'plan', 'recommend',
+  'evaluate', 'compare', 'assess', 'diagnose', 'optimize', 'redesign',
+  'build a system', 'how should i', 'what would you suggest', 'pros and cons',
+  'tradeoffs', 'trade-offs', 'roadmap', 'long term', 'big picture'
+];
+
+/**
+ * Select the optimal model based on task complexity.
+ * Can be overridden by passing options.model explicitly.
+ *
+ * @param {string} userInput - The user's latest message
+ * @param {object} context   - { type: 'sales'|'booking'|'support'|'internal', ... }
+ * @returns {string} OpenRouter model string
+ */
+function selectOptimalModel(userInput = '', context = {}) {
+  const input = userInput.toLowerCase().trim();
+  const length = input.length;
+
+  // Short & simple → fast/cheap model
+  if (length < 150 && SIMPLE_KEYWORDS.some(kw => input.includes(kw))) {
+    return MODELS.fast;
+  }
+
+  // Complex reasoning → Opus
+  if (COMPLEX_KEYWORDS.some(kw => input.includes(kw))) {
+    return MODELS.opus;
+  }
+
+  // Sales and voice conversations benefit from Sonnet's nuance
+  if (context.type === 'sales' || context.type === 'booking' || context.type === 'voice') {
+    return MODELS.sonnet;
+  }
+
+  // Default: Sonnet for everything else
+  return MODELS.sonnet;
+}
 
 function getProvider() {
   return (process.env.LLM_PROVIDER || 'openrouter').toLowerCase();
@@ -27,7 +82,7 @@ function getProvider() {
 
 function getModel() {
   const provider = getProvider();
-  return process.env.OPENROUTER_MODEL || process.env.LLM_MODEL || PROVIDERS[provider]?.defaultModel || 'anthropic/claude-sonnet-4-5';
+  return process.env.OPENROUTER_MODEL || process.env.LLM_MODEL || PROVIDERS[provider]?.defaultModel || MODELS.sonnet;
 }
 
 // ─── OPENROUTER (OpenAI-compatible fetch) ─────────────────────────────────────
@@ -112,28 +167,42 @@ async function callAnthropic(messages, systemPrompt, options = {}) {
 
 /**
  * Send messages to the configured LLM provider.
- * @param {Array} messages - Array of { role, content } objects
+ * Smart routing automatically picks the right model tier unless options.model is set.
+ *
+ * @param {Array}  messages    - Array of { role, content } objects
  * @param {string} systemPrompt - System prompt string
- * @param {object} options - { model, maxTokens, temperature, tools }
+ * @param {object} options     - { model, maxTokens, temperature, tools, context }
+ *   options.model    — override auto-routing (use a specific model string)
+ *   options.context  — { type: 'sales'|'booking'|'voice'|'internal' } for routing hints
  * @returns {object} { content, role, model, provider, usage, stopReason }
  */
 async function chat(messages, systemPrompt, options = {}) {
   const provider = getProvider();
-  console.log(`[LLM] Provider: ${provider} | Model: ${options.model || getModel()}`);
+
+  // Smart model selection — use explicit override or auto-route based on last user message
+  if (!options.model) {
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+    const userInput = typeof lastUserMsg?.content === 'string'
+      ? lastUserMsg.content
+      : lastUserMsg?.content?.[0]?.text || '';
+    options.model = selectOptimalModel(userInput, options.context || {});
+  }
+
+  console.log(`[LLM] Provider: ${provider} | Model: ${options.model}`);
 
   try {
     if (provider === 'anthropic') {
       return await callAnthropic(messages, systemPrompt, options);
     }
-    // Default: OpenRouter
+    // Default: OpenRouter (supports all model tiers via unified API)
     return await callOpenRouter(messages, systemPrompt, options);
   } catch (err) {
     console.error(`[LLM] ${provider} failed: ${err.message}`);
 
-    throw err;
+    // Fallback: if OpenRouter fails and we have a direct Anthropic key, try it
     if (provider === 'openrouter' && process.env.ANTHROPIC_API_KEY) {
       console.log('[LLM] Falling back to Anthropic direct...');
-      const fallbackOptions = { ...options, model: 'claude-sonnet-4-5' };
+      const fallbackOptions = { ...options, model: 'claude-sonnet-4-5-20250929' };
       return await callAnthropic(messages, systemPrompt, fallbackOptions);
     }
 
@@ -141,4 +210,4 @@ async function chat(messages, systemPrompt, options = {}) {
   }
 }
 
-module.exports = { chat, getProvider, getModel, PROVIDERS };
+module.exports = { chat, getProvider, getModel, selectOptimalModel, MODELS, PROVIDERS };
