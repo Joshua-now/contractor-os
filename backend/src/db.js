@@ -80,6 +80,9 @@ async function initDB() {
           await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS password_hash TEXT`);
           await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'contractor'`);
 
+          // Safe migration: bob_enabled toggle — lets contractors/admin pause AI to save costs
+          await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS bob_enabled BOOLEAN DEFAULT true`);
+
           // Safe migration: add lead_phone if it doesn't exist yet
           await client.query(`ALTER TABLE memory ADD COLUMN IF NOT EXISTS lead_phone TEXT`);
 

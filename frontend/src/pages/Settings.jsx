@@ -98,6 +98,40 @@ export default function Settings({ auth, apiUrl, onLogout }) {
         </div>
       </div>
 
+      {/* Bob Toggle */}
+      <div className="card">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="font-semibold text-lg">Bob AI Assistant</h2>
+            <p className="text-sm text-gray-400 mt-1">
+              {form.bob_enabled !== false
+                ? 'Bob is active — responding to leads and handling your desk.'
+                : 'Bob is paused — no AI responses or API calls will be made.'}
+            </p>
+          </div>
+          <button
+            onClick={() => setForm({ ...form, bob_enabled: form.bob_enabled === false ? true : false })}
+            className="relative inline-flex items-center w-14 h-7 rounded-full transition-colors focus:outline-none flex-shrink-0"
+            style={{
+              background: form.bob_enabled !== false ? '#7c3aed' : '#1e293b',
+              border: '1px solid',
+              borderColor: form.bob_enabled !== false ? '#7c3aed' : '#334155',
+            }}
+          >
+            <span
+              className="inline-block w-5 h-5 bg-white rounded-full shadow transition-transform"
+              style={{ transform: form.bob_enabled !== false ? 'translateX(30px)' : 'translateX(2px)' }}
+            />
+          </button>
+        </div>
+        {form.bob_enabled === false && (
+          <div className="mt-3 text-xs px-3 py-2 rounded-lg"
+            style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}>
+            Bob is OFF — save settings below to apply.
+          </div>
+        )}
+      </div>
+
       <button onClick={handleSave} disabled={saving} className="btn-primary flex items-center gap-2">
         <Save className="w-4 h-4" />
         {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Settings'}

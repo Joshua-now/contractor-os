@@ -74,6 +74,20 @@ export default function AdminDashboard({ apiUrl, auth, onImpersonate }) {
     setImpersonating(null)
   }
 
+  const toggleBob = async (id, currentValue) => {
+    try {
+      await fetch(`${apiUrl}/api/admin/contractors/${id}`, {
+        method: 'PUT',
+        headers: authH(auth.token),
+        body: JSON.stringify({ bob_enabled: !currentValue }),
+      })
+      // Refresh detail
+      fetchDetail(id)
+      // Update list
+      setContractors(prev => prev.map(c => c.id === id ? { ...c, bob_enabled: !currentValue } : c))
+    } catch {}
+  }
+
   useEffect(() => { fetchAll() }, [])
 
   return (
@@ -175,13 +189,27 @@ export default function AdminDashboard({ apiUrl, auth, onImpersonate }) {
                     {detail.contractor.phone || 'No phone'} · {detail.contractor.service_area || 'No service area set'}
                   </div>
                 </div>
-                <button
-                  onClick={() => impersonate(detail.contractor.id, detail.contractor.company_name || detail.contractor.name)}
-                  disabled={impersonating === detail.contractor.id}
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity disabled:opacity-50"
-                  style={{ background: 'rgba(124,58,237,0.2)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.3)' }}>
-                  {impersonating === detail.contractor.id ? 'Loading...' : '→ Log In As'}
-                </button>
+                <div className="flex flex-col gap-2 items-end">
+                  <button
+                    onClick={() => impersonate(detail.contractor.id, detail.contractor.company_name || detail.contractor.name)}
+                    disabled={impersonating === detail.contractor.id}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity disabled:opacity-50"
+                    style={{ background: 'rgba(124,58,237,0.2)', color: '#a78bfa', border: '1px solid rgba(124,58,237,0.3)' }}>
+                    {impersonating === detail.contractor.id ? 'Loading...' : '→ Log In As'}
+                  </button>
+                  {/* Bob toggle */}
+                  <button
+                    onClick={() => toggleBob(detail.contractor.id, detail.contractor.bob_enabled !== false)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium"
+                    style={{
+                      background: detail.contractor.bob_enabled !== false ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                      color:      detail.contractor.bob_enabled !== false ? '#22c55e' : '#f87171',
+                      border:     '1px solid',
+                      borderColor: detail.contractor.bob_enabled !== false ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)',
+                    }}>
+                    Bob {detail.contractor.bob_enabled !== false ? 'ON ●' : 'OFF ○'}
+                  </button>
+                </div>
               </div>
 
               {/* Mini stats */}

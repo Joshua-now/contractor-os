@@ -37,6 +37,14 @@ router.post('/chat', requireAuth, async (req, res) => {
             // Contractor identity comes from the verified JWT via requireAuth middleware
             const cRow = req.contractor;
 
+            // BOB ENABLED CHECK — if contractor has paused Bob, return friendly message
+            if (cRow.bob_enabled === false) {
+              return res.json({
+                reply: "Bob is currently offline. Turn Bob back on in your Settings to resume AI assistance.",
+                sessionId: sid,
+              });
+            }
+
             // SALES DESK MODE: contractor's Fluid Productions assistant
             if (mode === 'sales') {
                           const history = sessions.get(sid) || [];
