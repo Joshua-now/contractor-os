@@ -80,7 +80,14 @@ router.post('/telnyx/sms', express.json(), async (req, res) => {
 });
 
 // -- SMS TEST ENDPOINT (dev/testing only) ------------------------
+// Requires X-Test-Secret header matching TEST_SECRET env var.
+// Blocked entirely in production unless TEST_SECRET is explicitly set.
 router.post('/sms-test', express.json(), async (req, res) => {
+      const testSecret = process.env.TEST_SECRET;
+      const providedSecret = req.headers['x-test-secret'];
+      if (!testSecret || providedSecret !== testSecret) {
+            return res.status(403).json({ error: 'Forbidden — set X-Test-Secret header matching TEST_SECRET env var' });
+      }
       const { from, to, body } = req.body;
       const testFrom = from || '+15555550100';
       const testTo = to || process.env.TELNYX_PHONE_NUMBER || '+13217324521';

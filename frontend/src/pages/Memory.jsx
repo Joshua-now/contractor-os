@@ -12,7 +12,7 @@ export default function Memory({ auth, apiUrl }) {
 
   const fetchMemory = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/memory/${contractorId}`, { headers })
+      const res = await fetch(`${apiUrl}/api/memory`, { headers })
       setMemory(await res.json())
     } catch (err) {
       console.error(err)
@@ -25,7 +25,7 @@ export default function Memory({ auth, apiUrl }) {
 
   const saveEntry = async (entry) => {
     try {
-      await fetch(`${apiUrl}/api/memory/${contractorId}`, {
+      await fetch(`${apiUrl}/api/memory`, {
         method: 'PUT',
         headers,
         body: JSON.stringify(entry)
@@ -41,7 +41,7 @@ export default function Memory({ auth, apiUrl }) {
 
   const deleteEntry = async (key) => {
     try {
-      await fetch(`${apiUrl}/api/memory/${contractorId}/${key}`, { method: 'DELETE', headers })
+      await fetch(`${apiUrl}/api/memory/${key}`, { method: 'DELETE', headers })
       setMemory(memory.filter(m => m.key !== key))
     } catch (err) {
       console.error(err)

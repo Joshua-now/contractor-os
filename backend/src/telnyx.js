@@ -35,27 +35,37 @@ async function sendSMS(to, body) {
 }
 
 /**
- * Verify Telnyx webhook signature
+ * Verify Telnyx webhook signature.
+ * In production (NODE_ENV=production), TELNYX_PUBLIC_KEY MUST be set — requests
+ * fail closed (return false) if missing. In dev/staging, missing key logs a warning
+ * and passes through so you can test without a real Telnyx account.
  */
 function verifyWebhook(req) {
-      const telnyxPublicKey = process.env.TELNYX_PUBLIC_KEY;
-      if (!telnyxPublicKey) {
-              console.warn('[Telnyx] No public key set - skipping signature verification');
-              return true;
-      }
-      try {
-              const telnyx = getTelnyx();
-              const constructedEvent = telnyx.webhooks.constructEvent(
-                        req.body,
-                        req.headers['telnyx-signature-ed25519'],
-                        req.headers['telnyx-timestamp'],
-                        telnyxPublicKey
-                      );
-              return !!constructedEvent;
-      } catch (err) {
-              console.error('[Telnyx] Webhook verification failed:', err?.message || String(err));
-              return false;
-      }
+  const telnyxPublicKey = process.env.TELNYX_PUBLIC_KEY;
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (!telnyxPublicKey) {
+    if (isProd) {
+      console.error('[Telnyx] CRITICAL: TELNYX_PUBLIC_KEY not set in production — rejecting webhook');
+      return false; // Fail closed in production
+    }
+    console.warn('[Telnyx] No public key set — skipping signature verification (dev mode only)');
+    return true;
+  }
+
+  try {
+    const telnyx = getTelnyx();
+    const constructedEvent = telnyx.webhooks.constructEvent(
+      req.body,
+      req.headers['telnyx-signature-ed25519'],
+      req.headers['telnyx-timestamp'],
+      telnyxPublicKey
+    );
+    return !!constructedEvent;
+  } catch (err) {
+    console.error('[Telnyx] Webhook verification failed:', err?.message || String(err));
+    return false;
+  }
 }
 
 /**

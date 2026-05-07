@@ -76,6 +76,14 @@ async function initDB() {
                                                                                       )
                                                                                           `);
 
+          // Safe migration: conversations columns — direction, numbers, message content
+          // Skills (appointmentBooker, estimateFollowUp, reviewRequestor) insert these.
+          await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'inbound'`);
+          await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS from_number TEXT`);
+          await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS to_number TEXT`);
+          await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS message TEXT`);
+          await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_response TEXT`);
+
           // Safe migration: add password_hash and role for multitenant auth
           await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS password_hash TEXT`);
           await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'contractor'`);
@@ -195,6 +203,8 @@ async function initDB() {
 
           // Indexes
           await client.query(`CREATE INDEX IF NOT EXISTS idx_conversations_contractor ON conversations(contractor_id)`);
+                  await client.query(`CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC)`);
+                  await client.query(`CREATE INDEX IF NOT EXISTS idx_tasks_run_at ON tasks(run_at, status)`);
                   await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
                   await client.query(`CREATE INDEX IF NOT EXISTS idx_memory_contractor ON memory(contractor_id)`);
                   await client.query(`CREATE INDEX IF NOT EXISTS idx_memory_lead_phone ON memory(contractor_id, lead_phone)`);

@@ -15,6 +15,8 @@ const pool = require('../db');
 const FormData = require('form-data');
 const { runConversation } = require('../fieldOffice');
 const outboundQueue = require('../outboundQueue');
+const requireAuth  = require('../middleware/auth');
+const { verifyWebhook: verifyTelnyxWebhook } = require('../telnyx');
 
 // In-memory store for active calls (call_control_id → state)
 const activeCalls = new Map();
@@ -69,6 +71,11 @@ async function transcribeAudio(recordingUrl) {
 // ─── WEBHOOK ENTRY POINT ──────────────────────────────────────────────────────
 
 router.post('/webhook', async (req, res) => {
+  // Verify Telnyx signature (fails closed in production if TELNYX_PUBLIC_KEY not set)
+  if (!verifyTelnyxWebhook(req)) {
+    return res.status(403).json({ error: 'Invalid webhook signature' });
+  }
+
   res.sendStatus(200); // Acknowledge immediately
 
   const event = req.body?.data;
@@ -344,9 +351,9 @@ router.post('/webhook', async (req, res) => {
   }
 });
 
-// ─── ACTIVE CALL STATUS (optional debug endpoint) ─────────────────────────────
+// ─── ACTIVE CALL STATUS (admin/debug endpoint — requires JWT) ─────────────────
 // GET /api/voice/active
-router.get('/active', (req, res) => {
+router.get('/active', requireAuth, (req, res) => {
   const calls = [];
   for (const [id, state] of activeCalls.entries()) {
     calls.push({ callControlId: id, ...state, conversationHistory: undefined });

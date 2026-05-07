@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const requireAuth  = require('../middleware/auth');
+const requireAdmin = require('../middleware/adminAuth');
+
+// All routes require admin JWT — use /api/admin/contractors for the full-featured admin UI.
+// This file is a lightweight CRUD layer kept for backwards-compat internal tooling.
+router.use(requireAuth, requireAdmin);
 
 // GET all contractors
 router.get('/', async (req, res) => {

@@ -9,7 +9,7 @@ export default function Conversations({ auth, apiUrl }) {
 
   const fetchConversations = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/conversations/${contractorId}`, {
+      const res = await fetch(`${apiUrl}/api/conversations`, {
         headers: { 'Authorization': 'Bearer ' + auth.token }
       })
       setConversations(await res.json())
