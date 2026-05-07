@@ -17,8 +17,19 @@ const { startHeartbeat } = require('./heartbeat');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+// Middleware — support comma-separated FRONTEND_URL for multiple origins
+app.use(cors({
+  origin: function(origin, callback) {
+    const raw = process.env.FRONTEND_URL || '';
+    const allowed = raw.split(',').map(u => u.trim()).filter(Boolean);
+    // Allow if: no FRONTEND_URL set (wildcard), no origin (curl/Postman), or origin in list
+    if (!raw || !origin || allowed.includes('*') || allowed.includes(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error(`CORS: origin '${origin}' not allowed`));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
