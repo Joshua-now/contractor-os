@@ -12,15 +12,17 @@ function getGHLHeaders() {
     };
 }
 
-async function createGHLContact(data) {
-    const locationId = process.env.GHL_LOCATION_ID;
-    if (!locationId) {
+// locationId param lets multitenant callers pass contractor's GHL subaccount location.
+// Falls back to env var for Joshua's own account.
+async function createGHLContact(data, locationId) {
+    const loc = locationId || process.env.GHL_LOCATION_ID;
+    if (!loc) {
           console.warn('GHL_LOCATION_ID not set, skipping GHL contact creation');
           return null;
     }
     try {
           const res = await axios.post('https://services.leadconnectorhq.com/contacts/', {
-                  locationId,
+                  locationId: loc,
                   firstName: data.firstName || data.name?.split(' ')[0] || '',
                   lastName: data.lastName || data.name?.split(' ').slice(1).join(' ') || '',
                   phone: data.phone,

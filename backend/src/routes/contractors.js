@@ -56,7 +56,7 @@ router.put('/:id', async (req, res) => {
       const fields = ['name', 'company_name', 'email', 'phone', 'service_area',
                           'telnyx_phone', 'twilio_phone', 'sms_provider', 'ghl_location_id',
                           'ghl_contact_id', 'ai_persona', 'services', 'plan', 'active', 'onboarded',
-                          'bob_enabled'];
+                          'bob_enabled', 'crm_type', 'crm_api_key', 'crm_account_id'];
       const updates = [];
       const values = [];
       let i = 1;

@@ -38,7 +38,7 @@ export default function Settings({ auth, apiUrl, onLogout }) {
   if (!contractor) return <div className="text-gray-400">Loading settings...</div>
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="p-6 space-y-6 max-w-2xl">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -51,6 +51,40 @@ export default function Settings({ auth, apiUrl, onLogout }) {
           <LogOut className="w-4 h-4" />
           Switch Account
         </button>
+      </div>
+
+      {/* Bob Toggle — top of page for easy access */}
+      <div className="card">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="font-semibold text-lg">Bob AI Assistant</h2>
+            <p className="text-sm text-gray-400 mt-1">
+              {form.bob_enabled !== false
+                ? 'Bob is active — responding to leads and handling your desk.'
+                : 'Bob is paused — no AI responses or API calls will be made.'}
+            </p>
+          </div>
+          <button
+            onClick={() => setForm({ ...form, bob_enabled: form.bob_enabled === false ? true : false })}
+            className="relative inline-flex items-center w-14 h-7 rounded-full transition-colors focus:outline-none flex-shrink-0"
+            style={{
+              background: form.bob_enabled !== false ? '#7c3aed' : '#1e293b',
+              border: '1px solid',
+              borderColor: form.bob_enabled !== false ? '#7c3aed' : '#334155',
+            }}
+          >
+            <span
+              className="inline-block w-5 h-5 bg-white rounded-full shadow transition-transform"
+              style={{ transform: form.bob_enabled !== false ? 'translateX(30px)' : 'translateX(2px)' }}
+            />
+          </button>
+        </div>
+        {form.bob_enabled === false && (
+          <div className="mt-3 text-xs px-3 py-2 rounded-lg"
+            style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}>
+            Bob is OFF — save settings below to apply.
+          </div>
+        )}
       </div>
 
       <div className="card space-y-4">
@@ -98,37 +132,44 @@ export default function Settings({ auth, apiUrl, onLogout }) {
         </div>
       </div>
 
-      {/* Bob Toggle */}
-      <div className="card">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold text-lg">Bob AI Assistant</h2>
-            <p className="text-sm text-gray-400 mt-1">
-              {form.bob_enabled !== false
-                ? 'Bob is active — responding to leads and handling your desk.'
-                : 'Bob is paused — no AI responses or API calls will be made.'}
-            </p>
-          </div>
-          <button
-            onClick={() => setForm({ ...form, bob_enabled: form.bob_enabled === false ? true : false })}
-            className="relative inline-flex items-center w-14 h-7 rounded-full transition-colors focus:outline-none flex-shrink-0"
-            style={{
-              background: form.bob_enabled !== false ? '#7c3aed' : '#1e293b',
-              border: '1px solid',
-              borderColor: form.bob_enabled !== false ? '#7c3aed' : '#334155',
-            }}
-          >
-            <span
-              className="inline-block w-5 h-5 bg-white rounded-full shadow transition-transform"
-              style={{ transform: form.bob_enabled !== false ? 'translateX(30px)' : 'translateX(2px)' }}
-            />
-          </button>
+      {/* CRM Integration */}
+      <div className="card space-y-4">
+        <h2 className="font-semibold text-lg border-b border-gray-800 pb-3">CRM Integration</h2>
+        <p className="text-sm text-gray-400">All leads always sync to your Fluid Productions account. If you use your own CRM, connect it below and leads will mirror there too.</p>
+        <div>
+          <label className="text-sm text-gray-400 block mb-1">Your CRM</label>
+          <select className="input" value={form.crm_type || 'ghl'} onChange={e => setForm({...form, crm_type: e.target.value})}>
+            <option value="ghl">GHL Only (default)</option>
+            <option value="servicetitan">ServiceTitan</option>
+            <option value="jobber">Jobber</option>
+            <option value="housecall">Housecall Pro</option>
+            <option value="none">None</option>
+          </select>
         </div>
-        {form.bob_enabled === false && (
-          <div className="mt-3 text-xs px-3 py-2 rounded-lg"
-            style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}>
-            Bob is OFF — save settings below to apply.
-          </div>
+
+        {form.crm_type && form.crm_type !== 'ghl' && form.crm_type !== 'none' && (
+          <>
+            <div>
+              <label className="text-sm text-gray-400 block mb-1">
+                {form.crm_type === 'servicetitan' ? 'API Key (client_id:client_secret)' :
+                 form.crm_type === 'jobber'        ? 'OAuth Access Token' :
+                                                     'API Key'}
+              </label>
+              <input className="input" type="password"
+                value={form.crm_api_key || ''}
+                onChange={e => setForm({...form, crm_api_key: e.target.value})}
+                placeholder={form.crm_type === 'servicetitan' ? 'clientId:clientSecret' : 'Paste API key...'} />
+            </div>
+            {form.crm_type === 'servicetitan' && (
+              <div>
+                <label className="text-sm text-gray-400 block mb-1">Tenant ID</label>
+                <input className="input"
+                  value={form.crm_account_id || ''}
+                  onChange={e => setForm({...form, crm_account_id: e.target.value})}
+                  placeholder="Your ServiceTitan tenant ID" />
+              </div>
+            )}
+          </>
         )}
       </div>
 

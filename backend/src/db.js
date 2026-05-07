@@ -83,6 +83,11 @@ async function initDB() {
           // Safe migration: bob_enabled toggle — lets contractors/admin pause AI to save costs
           await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS bob_enabled BOOLEAN DEFAULT true`);
 
+          // Safe migration: CRM adapter — contractor's own CRM alongside Joshua's GHL backbone
+          await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS crm_type TEXT DEFAULT 'ghl'`);
+          await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS crm_api_key TEXT`);
+          await client.query(`ALTER TABLE contractors ADD COLUMN IF NOT EXISTS crm_account_id TEXT`);
+
           // Safe migration: add lead_phone if it doesn't exist yet
           await client.query(`ALTER TABLE memory ADD COLUMN IF NOT EXISTS lead_phone TEXT`);
 
