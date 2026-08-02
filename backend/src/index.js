@@ -22,8 +22,10 @@ app.use(cors({
   origin: function(origin, callback) {
     const raw = process.env.FRONTEND_URL || '';
     const allowed = raw.split(',').map(u => u.trim()).filter(Boolean);
-    // Allow if: no FRONTEND_URL set (wildcard), no origin (curl/Postman), or origin in list
-    if (!raw || !origin || allowed.includes('*') || allowed.includes(origin)) {
+    // Block unknown origins in production; allow dev if FRONTEND_URL not set
+    const isProd = process.env.NODE_ENV === 'production';
+    if (!raw && !isProd) return callback(null, true);
+    if (!origin || allowed.includes('*') || allowed.includes(origin)) {
       return callback(null, true);
     }
     callback(new Error(`CORS: origin '${origin}' not allowed`));
