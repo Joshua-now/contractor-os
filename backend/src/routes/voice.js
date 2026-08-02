@@ -358,6 +358,24 @@ router.post('/webhook', async (req, res) => {
             timeout_secs: 8,
             max_length_secs: 120,
           });
+        } else if (callState.state === 'transferring') {
+          // Harbor finished speaking — now actually transfer the call
+          const transferNumber = BUSINESS_HOURS.transferTo;
+          console.log(`[Voice] Transferring call ${callControlId} to ${transferNumber}`);
+          try {
+            const result = await transferCall(callControlId, transferNumber);
+            console.log(`[Voice] Transfer initiated: legB=${result.legB}`);
+            // Don't delete from activeCalls — call.hangup will clean up
+          } catch (err) {
+            console.error(`[Voice] Transfer failed: ${err.message}`);
+            // Fallback: tell the caller and take a message
+            callState.state = 'listening';
+            await telnyxAction(callControlId, 'speak', {
+              payload: "I'm sorry, I'm having trouble connecting you right now. Could you leave your name and number and I'll have Joshua call you back?",
+              voice: 'Polly.Matthew',
+              language: 'en-US',
+            });
+          }
         } else if (callState.state === 'hanging_up') {
           await telnyxAction(callControlId, 'hangup');
           activeCalls.delete(callControlId);
