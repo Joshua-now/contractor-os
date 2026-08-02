@@ -109,4 +109,26 @@ async function makeCall(to, webhookUrl) {
       }
 }
 
-module.exports = { sendSMS, verifyWebhook, parseInboundSMS, makeCall };
+/**
+ * Transfer an active call to another number (warm transfer via Telnyx)
+ */
+async function transferCall(callControlId, toNumber) {
+      try {
+              const telnyx = getTelnyx();
+              const resp = await telnyx.calls.create({
+                        connection_id: process.env.TELNYX_CONNECTION_ID,
+                        to: toNumber,
+                        from: process.env.TELNYX_PHONE_NUMBER,
+              });
+              const legB = resp.data.call_control_id;
+              console.log(`[Telnyx] Bridge leg created: ${legB} → transferring ${callControlId} to ${toNumber}`);
+              // Bridge the two legs
+              await telnyx.calls.bridge(callControlId, { call_control_id: legB });
+              return { success: true, legB };
+      } catch (err) {
+              console.error('[Telnyx] Transfer error:', err?.message || String(err));
+              throw err;
+      }
+}
+
+module.exports = { sendSMS, verifyWebhook, parseInboundSMS, makeCall, transferCall };

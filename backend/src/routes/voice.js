@@ -17,9 +17,30 @@ const { runConversation } = require('../fieldOffice');
 const outboundQueue = require('../outboundQueue');
 const requireAuth  = require('../middleware/auth');
 const { verifyWebhook: verifyTelnyxWebhook } = require('../telnyx');
+const { transferCall } = require('../telnyx');
 
 // In-memory store for active calls (call_control_id → state)
 const activeCalls = new Map();
+
+// ─── BUSINESS HOURS CONFIG ──────────────────────────────────────────────────
+// Harbor answers 24/7 but only transfers to Joshua during business hours.
+// After hours: Harbor takes a message and tells the caller to leave details.
+const BUSINESS_HOURS = {
+  timezone: 'America/New_York',       // Eastern Time
+  days: [1, 2, 3, 4, 5],             // Monday=1 through Friday=5
+  start: 8,                           // 8:00 AM
+  end: 18,                            // 6:00 PM
+  transferTo: process.env.JOSHUA_CELL || '+13212055991',  // (321) 205-5991
+};
+
+function isBusinessHours() {
+  const now = new Date();
+  const etStr = now.toLocaleString('en-US', { timeZone: BUSINESS_HOURS.timezone });
+  const etDate = new Date(etStr);
+  const day = etDate.getDay();         // 0=Sun, 1=Mon ... 6=Sat
+  const hour = etDate.getHours();
+  return BUSINESS_HOURS.days.includes(day) && hour >= BUSINESS_HOURS.start && hour < BUSINESS_HOURS.end;
+}
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +89,84 @@ async function transcribeAudio(recordingUrl) {
   return whisperResp.data.text || '';
 }
 
+// ─── HARBOR: Customer-Facing Conversation Handler ────────────────────────────
+// Harbor handles external customer calls. Friendly, professional, qualifies leads.
+// After 2-3 exchanges, asks if they want to speak to someone (transfer during business hours).
+const HARBOR_SYSTEM_PROMPT = `You are Harbor, a friendly and professional phone receptionist for AI Teammate, a company that provides AI phone answering and automation services for small businesses (roofers, plumbers, HVAC, etc).
+
+Your job:
+- Be warm, helpful, and conversational
+- Find out what the caller needs
+- If they're interested in services: ask about their business, what problems they have with missed calls or after-hours coverage
+- Keep responses SHORT — 1-2 sentences max. This is a phone call, not an essay.
+- After understanding their need, say something like: "I'd love to connect you with Joshua to talk more about how we can help. One moment."
+- If they have a question you can't answer, say you'll have someone follow up
+- NEVER say you're an AI. You're Harbor, part of the team.
+
+IMPORTANT: Respond in plain text only. Keep it natural and conversational. No markdown, no bullet points.`;
+
+async function runHarborConversation(history, transcript, turnCount) {
+  try {
+    const messages = [
+      { role: 'system', content: HARBOR_SYSTEM_PROMPT },
+      ...history,
+      { role: 'user', content: transcript },
+    ];
+
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4',
+        messages,
+        max_tokens: 200,
+        temperature: 0.7,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`OpenRouter ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content || "I'm sorry, could you repeat that?";
+    
+    // Add to history
+    const updatedHistory = [
+      ...history,
+      { role: 'user', content: transcript },
+      { role: 'assistant', content: reply },
+    ];
+
+    // After 2+ turns, check if we should transfer
+    const shouldTransfer = turnCount >= 2 && (
+      reply.toLowerCase().includes('connect you') ||
+      reply.toLowerCase().includes('joshua') ||
+      reply.toLowerCase().includes('one moment') ||
+      reply.toLowerCase().includes('let me')
+    );
+
+    return {
+      reply,
+      history: updatedHistory,
+      shouldTransfer,
+      shouldHangUp: false,
+    };
+  } catch (err) {
+    console.error('[Harbor] Conversation error:', err.message);
+    return {
+      reply: "I'm having a bit of trouble right now. Could you try again in a moment?",
+      history: history,
+      shouldTransfer: false,
+      shouldHangUp: false,
+    };
+  }
+}
+
 // ─── WEBHOOK ENTRY POINT ──────────────────────────────────────────────────────
 
 router.post('/webhook', async (req, res) => {
@@ -102,7 +201,7 @@ router.post('/webhook', async (req, res) => {
           break;
         }
 
-        // INBOUND: Look up contractor by the number they called
+        // ── INBOUND: Look up contractor by the number they called
         const result = await pool.query(
           'SELECT * FROM contractors WHERE telnyx_phone = $1',
           [to]
@@ -113,12 +212,17 @@ router.post('/webhook', async (req, res) => {
           break;
         }
 
+        // Determine if Joshua is calling his own line (internal) or a customer (external)
+        const isInternal = from === BUSINESS_HOURS.transferTo || from === contractor.phone;
+
         activeCalls.set(callControlId, {
           contractorId: contractor.id,
           contractorName: contractor.name,
           conversationHistory: [],
           state: 'ringing',
           direction: 'inbound',
+          isInternal,              // true = Joshua calling Bob, false = customer calling Harbor
+          callerNumber: from,
         });
 
         await telnyxAction(callControlId, 'answer');
@@ -155,13 +259,16 @@ router.post('/webhook', async (req, res) => {
           break;
         }
 
-        // ── INBOUND: play greeting ──
+        // ── INBOUND: play greeting (Harbor for customers, Bob for Joshua) ──
         const callState = activeCalls.get(callControlId);
         if (!callState) break;
 
         callState.state = 'greeting';
+        const greeting = callState.isInternal
+          ? `Hey Joshua, it's Bob. What do you need?`
+          : `Thanks for calling! This is Harbor. I'm part of the team here. How can I help you today?`;
         await telnyxAction(callControlId, 'speak', {
-          payload: `Hey Joshua, it's Bob. What do you need?`,
+          payload: greeting,
           voice: 'Polly.Matthew',
           language: 'en-US',
         });
@@ -303,7 +410,51 @@ router.post('/webhook', async (req, res) => {
           break;
         }
 
-        // Run conversation turn
+        // ── EXTERNAL CALL: Harbor conversation (customer-facing) ──
+        if (!callState.isInternal) {
+          // Use a lightweight Harbor prompt for customer calls
+          const harborReply = await runHarborConversation(
+            callState.conversationHistory,
+            transcript,
+            callState.turnCount || 0
+          );
+          callState.conversationHistory = harborReply.history;
+          callState.turnCount = (callState.turnCount || 0) + 1;
+
+          // Check if Harbor decided to transfer the call
+          if (harborReply.shouldTransfer) {
+            if (isBusinessHours()) {
+              // Business hours: transfer to Joshua's cell
+              callState.state = 'transferring';
+              await telnyxAction(callControlId, 'speak', {
+                payload: stripEmoji(harborReply.reply),
+                voice: 'Polly.Matthew',
+                language: 'en-US',
+              });
+              // After speak.ended we'll do the actual transfer
+            } else {
+              // After hours: say we'll follow up
+              callState.state = 'hanging_up';
+              const afterHoursReply = harborReply.afterHoursReply ||
+                "I appreciate you calling. We're currently after hours, but I've noted your information and someone will follow up with you during business hours. Have a great day!";
+              await telnyxAction(callControlId, 'speak', {
+                payload: stripEmoji(afterHoursReply),
+                voice: 'Polly.Matthew',
+                language: 'en-US',
+              });
+            }
+          } else {
+            callState.state = harborReply.shouldHangUp ? 'hanging_up' : 'listening';
+            await telnyxAction(callControlId, 'speak', {
+              payload: stripEmoji(harborReply.reply),
+              voice: 'Polly.Matthew',
+              language: 'en-US',
+            });
+          }
+          break;
+        }
+
+        // ── INTERNAL CALL: Bob conversation (Joshua's personal assistant) ──
         let reply, shouldHangUp, updatedHistory;
         try {
           ({ reply, shouldHangUp, updatedHistory } = await runConversation(
