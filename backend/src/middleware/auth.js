@@ -6,6 +6,15 @@ const jwt = require('jsonwebtoken');
 const pool = require('../db');
 
 async function requireAuth(req, res, next) {
+  // ── Agent key: let Hermes in without a login/JWT ──
+  const agentKey = req.headers["x-api-key"];
+  if (typeof agentKey === "string" && process.env.API_KEY &&
+      agentKey.trim().toLowerCase() === process.env.API_KEY.trim().toLowerCase()) {
+    req.contractor = { id: "hermes", email: "hermes@system", name: "Hermes", role: "superadmin" };
+    return next();
+  }
+
+  // ── normal login/JWT (unchanged) ──
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
 
